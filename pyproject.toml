@@ -4,8 +4,10 @@ version = "1.0.0"
 description = "Prompt engineering, Danbooru dictionary lookup, and AI prompt refinement nodes for ComfyUI."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "AGPL-3.0-only"
 dependencies = []
 classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Operating System :: OS Independent",
 ]
 
