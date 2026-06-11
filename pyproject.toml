@@ -1,0 +1,21 @@
+[project]
+name = "galiais-nodes"
+version = "1.0.0"
+description = "Prompt engineering, Danbooru dictionary lookup, and AI prompt refinement nodes for ComfyUI."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/GALIAIS/GALIAIS-Nodes"
+Documentation = "https://github.com/GALIAIS/GALIAIS-Nodes#readme"
+"Bug Tracker" = "https://github.com/GALIAIS/GALIAIS-Nodes/issues"
+"Danbooru Tag Database" = "https://github.com/GALIAIS/Danbooru-Tag-Database"
+
+[tool.comfy]
+PublisherId = "galiais"
+DisplayName = "GALIAIS-Nodes"
+Icon = ""

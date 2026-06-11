@@ -1,0 +1,32 @@
+# Development and test files
+test_*.py
+build_runtime_db.py
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# Local databases and generated runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.json.tmp
+*.log
+
+# Local editor and environment state
+.git/
+.github/
+.vscode/
+.idea/
+.venv/
+venv/
+env/
+
+# Local build output
+build/
+dist/
+*.spec
+*.exe
+*.zip
+*.rar
