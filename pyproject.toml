@@ -18,4 +18,3 @@ Documentation = "https://github.com/GALIAIS/GALIAIS-Nodes#readme"
 [tool.comfy]
 PublisherId = "galiais"
 DisplayName = "GALIAIS-Nodes"
-Icon = ""

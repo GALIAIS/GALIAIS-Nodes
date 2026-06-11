@@ -50,6 +50,8 @@ Before first publication, verify:
 - `project.name` is the final immutable registry node id.
 - `[tool.comfy].PublisherId` exactly matches the publisher id shown after `@` on the Comfy Registry profile.
 - `[project.urls].Repository` points to the public GitHub repository.
+- Optional registry artwork fields such as `Icon` and `Banner` should only be added after stable public image URLs are available.
+- Optional license metadata should be added after the project license is decided.
 
 Manual publish:
 
@@ -60,4 +62,7 @@ comfy node publish
 GitHub Actions publish:
 
 1. Create a repository secret named `REGISTRY_ACCESS_TOKEN`.
-2. Run the `Publish to Comfy registry` workflow manually or push a version change in `pyproject.toml`.
+2. Run the `Publish to Comfy registry` workflow manually or push a version tag such as `v1.0.1`.
+
+The workflow intentionally publishes only on `v*` tags, so ordinary commits to
+`main` will not push a new registry release.
