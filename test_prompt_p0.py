@@ -39,6 +39,133 @@ def test_character_section_weight_is_applied():
     assert section["tags"] == ["(long hair:1.25)", "(blue eyes:1.25)"]
 
 
+def test_character_composer_groups_scoped_sections_by_character_slot():
+    load_package()
+    character = sys.modules["galiais_nodes_p0.nodes_galiais_character_prompt"]
+
+    alice_identity = character.character_section_text("core", ["1girl, alice"])
+    character._apply_character_scope(alice_identity, "角色1", "Alice")
+    alice_outfit = character.character_section_text("outfit", ["red dress"])
+    character._apply_character_scope(alice_outfit, "角色1", "Alice")
+    alice_pose = character.character_section_text("pose", ["standing"])
+    character._apply_character_scope(alice_pose, "角色1", "Alice")
+
+    bob_identity = character.character_section_text("core", ["1boy, bob"])
+    character._apply_character_scope(bob_identity, "角色2", "Bob")
+    bob_outfit = character.character_section_text("outfit", ["black suit"])
+    character._apply_character_scope(bob_outfit, "角色2", "Bob")
+    bob_pose = character.character_section_text("pose", ["sitting"])
+    character._apply_character_scope(bob_pose, "角色2", "Bob")
+
+    scene = character.character_section_text("scene", ["classroom"])
+    positive, negative, metadata = character.compose_character_prompt(
+        [alice_pose, bob_pose, scene, bob_identity, alice_identity, bob_outfit, alice_outfit],
+        multi_character_mode="自动",
+    )
+
+    assert negative == ""
+    assert "1girl, alice, red dress, standing" in positive
+    assert "1boy, bob, black suit, sitting" in positive
+    assert positive.index("1girl") < positive.index("1boy") < positive.index("classroom")
+    assert "; " in positive
+    assert '"multi_character_enabled": true' in metadata
+    assert '"slot": "角色1"' in metadata
+    assert '"label": "Alice"' in metadata
+    assert '"slot": "角色2"' in metadata
+    assert '"label": "Bob"' in metadata
+
+
+def test_character_composer_keeps_legacy_flat_mode_for_global_sections():
+    load_package()
+    character = sys.modules["galiais_nodes_p0.nodes_galiais_character_prompt"]
+
+    identity = character.character_section_text("core", ["1girl, alice"])
+    outfit = character.character_section_text("outfit", ["red dress"])
+    positive, _, metadata = character.compose_character_prompt([outfit, identity], multi_character_mode="自动")
+
+    assert positive == "1girl, alice, red dress"
+    assert '"multi_character_enabled": false' in metadata
+
+
+def test_character_composer_can_force_flat_mode_for_scoped_sections():
+    load_package()
+    character = sys.modules["galiais_nodes_p0.nodes_galiais_character_prompt"]
+
+    identity = character.character_section_text("core", ["1girl, alice"])
+    character._apply_character_scope(identity, "角色1", "Alice")
+    outfit = character.character_section_text("outfit", ["red dress"])
+    character._apply_character_scope(outfit, "角色1", "Alice")
+    positive, _, metadata = character.compose_character_prompt(
+        [outfit, identity],
+        multi_character_mode="关闭",
+    )
+
+    assert positive == "1girl, alice, red dress"
+    assert '"multi_character_enabled": false' in metadata
+
+
+def test_character_node_scope_accepts_new_and_legacy_position_args():
+    load_package()
+    character = sys.modules["galiais_nodes_p0.nodes_galiais_character_prompt"]
+    node = character.GaliaisNodesCharacterIdentity()
+
+    new_order = node.run(
+        "1girl",
+        "alice",
+        "",
+        "",
+        "",
+        "",
+        True,
+        1.0,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        "只补空字段",
+        0,
+        0,
+        False,
+        0,
+        "角色1",
+        "Alice",
+        None,
+    )
+    old_order = node.run(
+        "1girl",
+        "alice",
+        "",
+        "",
+        "",
+        "",
+        True,
+        1.0,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        "只补空字段",
+        0,
+        0,
+        False,
+        0,
+        None,
+    )
+
+    scoped_section = node_result(new_order)[0]
+    legacy_section = node_result(old_order)[0]
+
+    assert scoped_section["character_scope"]["slot"] == "角色1"
+    assert scoped_section["character_scope"]["label"] == "Alice"
+    assert legacy_section["character_scope"]["slot"] == "全局"
+
+
 def test_prompt_builder_keeps_lighting_part():
     load_package()
     system = sys.modules["galiais_nodes_p0.nodes_galiais_prompt_system"]
@@ -203,6 +330,65 @@ def test_character_body_can_randomize_empty_fields_from_db():
     assert '"enabled": true' in metadata
 
 
+def test_random_display_is_cleared_when_manual_fields_block_random_fill():
+    load_package()
+    character = sys.modules["galiais_nodes_p0.nodes_galiais_character_prompt"]
+    db_path = ROOT.parent / "danbooru-dictionary.runtime.db"
+    if not db_path.exists():
+        return
+    node = character.GaliaisNodesCharacterBody()
+
+    output = node.run(
+        "blue eyes",
+        "standing",
+        "pale skin",
+        "animal ears",
+        "",
+        True,
+        1.0,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        "只补空字段",
+        1,
+        123,
+        False,
+        0,
+        {"db_path": str(db_path)},
+    )
+    section, _, _ = node_result(output)
+
+    assert isinstance(output, dict)
+    assert output["ui"]["galiais_random_fields"] == []
+    assert section["random"]["random_field_values"] == {}
+
+
+def test_taxonomy_random_display_is_cleared_when_random_has_no_output():
+    load_package()
+    system = sys.modules["galiais_nodes_p0.nodes_galiais_prompt_system"]
+    node = system.GaliaisNodesDanbooruTaxonomySelect()
+
+    output = node.run(
+        "0.appearance.eyes.color.eye_color",
+        "blue eyes",
+        "",
+        False,
+        True,
+        1.0,
+        True,
+        2,
+        123,
+    )
+    text, _ = node_result(output)
+
+    assert text == "blue eyes"
+    assert isinstance(output, dict)
+    assert output["ui"]["galiais_random_fields"] == []
+
+
 def test_frontend_random_execution_display_does_not_write_manual_widgets():
     js_path = ROOT / "web" / "js" / "galiais_nodes_danbooru_lazy_select.js"
     script = f"""
@@ -220,6 +406,9 @@ if (!handler || !handler[0].includes("updateRandomFieldsWidget(this, message || 
 }}
 if (handler[0].includes("setWidgetValue(")) {{
   throw new Error("onExecuted still writes into manual widgets");
+}}
+if (!source.includes("const hasRandomFieldPayload = Object.prototype.hasOwnProperty.call(message || {{}}, \\"galiais_random_fields\\")")) {{
+  throw new Error("random display does not distinguish clear payloads from missing payloads");
 }}
 """
     subprocess.run(["node", "-e", script], check=True)
@@ -261,11 +450,65 @@ if (!source.includes("new MutationObserver") ||
 if (!source.includes("setWidgetValue(currentPair.enableWidget, !isFieldEnabled(currentPair.enableWidget))")) {{
   throw new Error("inline field toggles do not write back to hidden enable widgets");
 }}
-if (!source.includes("if (!vueNodeElement(this) && toggleFieldEnableAtPosition(this, pos, fieldEnablePairs))")) {{
+if (!source.includes("if (!isVueNodeMode(this) && toggleFieldEnableAtPosition(this, pos, fieldEnablePairs))")) {{
   throw new Error("legacy canvas field toggles are not limited to non-Vue node mode");
 }}
 if (!source.includes("widget._galiaisFieldEnabled = isFieldEnabled(pair.enableWidget)")) {{
   throw new Error("disabled fields are not marked for dim drawing");
+}}
+"""
+    subprocess.run(["node", "-e", script], check=True)
+
+
+def test_frontend_legacy_canvas_field_toggles_reserve_widget_space():
+    js_path = ROOT / "web" / "js" / "galiais_nodes_danbooru_lazy_select.js"
+    script = f"""
+const fs = require("fs");
+const source = fs.readFileSync({str(js_path)!r}, "utf8");
+for (const name of [
+  "const FIELD_ENABLE_CANVAS_RESERVED_WIDTH",
+  "function patchLegacyCanvasWidgetDraw",
+  "function ensureLegacyCanvasFieldEnableLayout",
+  "function updateLegacyCanvasFieldEnableToggles",
+  "function scheduleLegacyCanvasFieldEnableToggles",
+  "function removeLegacyCanvasFieldEnableToggles",
+  "function handleLegacyCanvasFieldTogglePointer",
+  "function ensureLegacyCanvasPointerHandler",
+]) {{
+  if (!source.includes(name)) {{
+    throw new Error(`${{name}} is missing`);
+  }}
+}}
+if (!source.includes("const reserved = Number(widget._galiaisCanvasReservedWidth || 0)") ||
+    !source.includes("const drawWidth = Math.max(80, Number(width || 0) - reserved)") ||
+    !source.includes("ctx, nodeArg, drawWidth, y, height, lowQuality")) {{
+  throw new Error("legacy canvas widget draw width is not reduced for inline toggles");
+}}
+if (source.includes("FIELD_ENABLE_CANVAS_MIN_WIDTH") ||
+    source.includes("legacyCanvasFieldEnableMinimumWidth") ||
+    source.includes("node.setSize([minimumWidth")) {{
+  throw new Error("legacy canvas field toggles must not force node width on refresh");
+}}
+if (!source.includes("ensureLegacyCanvasFieldEnableLayout(node, fieldEnablePairs)")) {{
+  throw new Error("legacy canvas layout is not ensured during scrub");
+}}
+if (!source.includes("isVueNodeMode(this) && selectorFieldsForNode(this, lazyFields).length")) {{
+  throw new Error("legacy canvas still draws the floating DB selector button over widgets");
+}}
+if (!source.includes("!isVueNodeMode(this) && toggleFieldEnableAtPosition(this, pos, fieldEnablePairs)")) {{
+  throw new Error("legacy canvas field toggle hit testing is not isolated from Vue mode");
+}}
+if (!source.includes("element.addEventListener(\\"pointerdown\\", handleLegacyCanvasFieldTogglePointer, true)") ||
+    !source.includes("eventToCanvasPosition(event)") ||
+    !source.includes("nodeLocalPositionFromCanvas(node, canvasPos)")) {{
+  throw new Error("legacy canvas field toggles are not captured at the canvas level");
+}}
+if (!source.includes("const FIELD_ENABLE_CANVAS_TOGGLE_CLASS = \\"galiais-field-enable-canvas-toggle\\"") ||
+    !source.includes("document.body.appendChild(button)") ||
+    !source.includes("button.addEventListener(\\"pointerdown\\"") ||
+    !source.includes("canvasRectToClientRect(node, rect)") ||
+    !source.includes("removeLegacyCanvasFieldEnableToggles(this)")) {{
+  throw new Error("legacy canvas field toggles do not use real DOM overlays");
 }}
 """
     subprocess.run(["node", "-e", script], check=True)
@@ -902,6 +1145,10 @@ def test_ai_task_nodes_use_mock_client():
 
 if __name__ == "__main__":
     test_character_section_weight_is_applied()
+    test_character_composer_groups_scoped_sections_by_character_slot()
+    test_character_composer_keeps_legacy_flat_mode_for_global_sections()
+    test_character_composer_can_force_flat_mode_for_scoped_sections()
+    test_character_node_scope_accepts_new_and_legacy_position_args()
     test_prompt_builder_keeps_lighting_part()
     test_template_renders_dotted_slots_from_coarse_slots()
     test_all_taxonomy_tree_exposes_runtime_taxonomy()
@@ -909,8 +1156,11 @@ if __name__ == "__main__":
     test_taxonomy_select_can_randomize_tags_from_db()
     test_display_form_with_comma_label_is_parsed_as_one_tag()
     test_character_body_can_randomize_empty_fields_from_db()
+    test_random_display_is_cleared_when_manual_fields_block_random_fill()
+    test_taxonomy_random_display_is_cleared_when_random_has_no_output()
     test_frontend_random_execution_display_does_not_write_manual_widgets()
     test_frontend_field_enable_controls_are_inline_toggles()
+    test_frontend_legacy_canvas_field_toggles_reserve_widget_space()
     test_runtime_random_nodes_only_force_refresh_for_auto_seed()
     test_character_body_field_switch_disables_selected_and_random_tags()
     test_character_fixed_fields_cover_all_runtime_taxonomy()

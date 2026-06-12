@@ -440,6 +440,60 @@ def random_controls(default_allow_nsfw: bool = False):
     }
 
 
+CHARACTER_SCOPE_OPTIONS = ["全局"] + [f"角色{i}" for i in range(1, 9)]
+CHARACTER_SEPARATOR_OPTIONS = ["分号", "逗号", "换行"]
+
+
+def character_scope_controls(default_slot: str = "全局"):
+    safe_default = default_slot if default_slot in CHARACTER_SCOPE_OPTIONS else "全局"
+    return {
+        "角色槽位": (CHARACTER_SCOPE_OPTIONS, {"default": safe_default}),
+        "角色标签": ("STRING", {"default": "", "multiline": False}),
+    }
+
+
+def _normalize_character_slot(slot: str) -> tuple[str, int | None, bool]:
+    text_value = str(slot or "").strip()
+    if text_value not in CHARACTER_SCOPE_OPTIONS:
+        text_value = "全局"
+    if text_value == "全局":
+        return text_value, None, True
+    try:
+        return text_value, int(text_value.replace("角色", "", 1)), False
+    except ValueError:
+        return "全局", None, True
+
+
+def _apply_character_scope(section: dict, slot: str = "全局", label: str = "") -> dict:
+    normalized_slot, slot_index, is_global = _normalize_character_slot(slot)
+    clean_label = str(label or "").strip()
+    scope = {
+        "slot": normalized_slot,
+        "index": slot_index,
+        "label": clean_label,
+        "is_global": is_global,
+    }
+    section["character_scope"] = scope
+    section["character_slot"] = normalized_slot
+    section["character_label"] = clean_label
+    return section
+
+
+def _resolve_legacy_scope_args(DB, slot, label):
+    if isinstance(label, dict) and isinstance(DB, str):
+        return label, DB, slot
+    if isinstance(DB, str) and DB in CHARACTER_SCOPE_OPTIONS and not isinstance(label, dict):
+        return None, DB, slot
+    if DB is None and isinstance(slot, dict) and not str(label or "").strip():
+        return slot, "全局", ""
+    return DB, slot, label
+
+
+def _join_prompt_chunks(parts, separator: str = ", ") -> str:
+    cleaned = [str(part or "").strip().strip(",") for part in parts if str(part or "").strip().strip(",")]
+    return separator.join(cleaned)
+
+
 def _normalize_parts(parts, db_path: str = ""):
     normalized = []
     for part in parts:
@@ -572,7 +626,7 @@ def _random_ui_payload(random_meta: dict, mapping: dict[str, str]) -> dict:
         if field in field_values
     }
     if not widgets:
-        return {}
+        return {"galiais_random_fields": []}
     return {"galiais_random_fields": [widgets]}
 
 
@@ -615,6 +669,98 @@ def _section_tuple(section: dict):
     return (section, section["text"], _metadata_json(section))
 
 
+def _ordered_sections(active_sections):
+    return sorted(
+        enumerate(active_sections),
+        key=lambda item: (ANIMA_SECTION_ORDER.get(item[1].get("name"), 50), item[0]),
+    )
+
+
+def _section_scope(section: dict) -> dict:
+    scope = section.get("character_scope") if isinstance(section.get("character_scope"), dict) else {}
+    slot, index, is_global = _normalize_character_slot(scope.get("slot") or section.get("character_slot", "全局"))
+    return {
+        "slot": slot,
+        "index": index,
+        "label": str(scope.get("label") or section.get("character_label") or "").strip(),
+        "is_global": is_global,
+    }
+
+
+def _sections_text_and_artists(ordered_sections, *, dedupe: bool = True) -> tuple[str, list[str]]:
+    artist_tags = []
+    for _, section in ordered_sections:
+        artist = normalize_artist_tag(section.get("artist", ""))
+        if artist:
+            artist_tags.append(artist)
+    text_value = join_anima_prompt_parts(
+        [*artist_tags, *[section["text"] for _, section in ordered_sections]],
+        dedupe=dedupe,
+        allow_artist=True,
+    )
+    return text_value, artist_tags
+
+
+def _compose_scoped_character_sections(ordered_sections, *, dedupe: bool = True, separator: str = "分号") -> tuple[str, list[dict]]:
+    global_sections = []
+    character_groups: dict[str, dict] = {}
+    for original_index, section in ordered_sections:
+        scope = _section_scope(section)
+        if scope["is_global"]:
+            global_sections.append((original_index, section))
+            continue
+        group = character_groups.setdefault(
+            scope["slot"],
+            {
+                "slot": scope["slot"],
+                "index": scope["index"] or 999,
+                "label": scope["label"],
+                "sections": [],
+            },
+        )
+        if scope["label"] and not group["label"]:
+            group["label"] = scope["label"]
+        group["sections"].append((original_index, section))
+
+    characters = []
+    character_texts = []
+    for group in sorted(character_groups.values(), key=lambda item: item["index"]):
+        ordered_group_sections = _ordered_sections([section for _, section in group["sections"]])
+        text_value, artist_tags = _sections_text_and_artists(ordered_group_sections, dedupe=dedupe)
+        if not text_value:
+            continue
+        characters.append({
+            "slot": group["slot"],
+            "index": group["index"],
+            "label": group["label"],
+            "text": text_value,
+            "artist_tags": artist_tags,
+            "sections": [section for _, section in ordered_group_sections],
+        })
+        character_texts.append(text_value)
+
+    global_text, global_artist_tags = _sections_text_and_artists(global_sections, dedupe=dedupe)
+    separator_text = {
+        "分号": "; ",
+        "换行": "\n",
+        "逗号": ", ",
+    }.get(separator, "; ")
+    text_parts = [*character_texts]
+    if global_text:
+        text_parts.append(global_text)
+    scoped_text = separator_text.join(part for part in text_parts if str(part or "").strip())
+    if global_text:
+        characters.append({
+            "slot": "全局",
+            "index": None,
+            "label": "",
+            "text": global_text,
+            "artist_tags": global_artist_tags,
+            "sections": [section for _, section in global_sections],
+        })
+    return scoped_text, characters
+
+
 def compose_character_prompt(
     sections,
     *,
@@ -623,26 +769,38 @@ def compose_character_prompt(
     prefix: str = "",
     suffix: str = "",
     dedupe: bool = True,
+    multi_character_mode: str = "自动",
+    character_separator: str = "分号",
 ):
     active_sections = [
         section for section in sections
         if isinstance(section, dict) and section.get("enabled", True) and section.get("text")
     ]
-    ordered_sections = sorted(
-        enumerate(active_sections),
-        key=lambda item: (ANIMA_SECTION_ORDER.get(item[1].get("name"), 50), item[0]),
+    ordered_sections = _ordered_sections(active_sections)
+    scoped_requested = multi_character_mode == "开启" or (
+        multi_character_mode == "自动"
+        and any(not _section_scope(section)["is_global"] for _, section in ordered_sections)
     )
-    artist_tags = []
-    for _, section in ordered_sections:
-        artist = normalize_artist_tag(section.get("artist", ""))
-        if artist:
-            artist_tags.append(artist)
-    ordered_text = [section["text"] for _, section in ordered_sections]
-    positive = join_anima_prompt_parts(
-        [prefix, *artist_tags, *ordered_text, suffix],
-        dedupe=dedupe,
-        allow_artist=True,
-    )
+    if scoped_requested:
+        composed_text, characters = _compose_scoped_character_sections(
+            ordered_sections,
+            dedupe=dedupe,
+            separator=character_separator,
+        )
+        positive = _join_prompt_chunks([prefix, composed_text, suffix])
+        artist_tags = [
+            artist
+            for character in characters
+            for artist in character.get("artist_tags", [])
+        ]
+    else:
+        composed_text, artist_tags = _sections_text_and_artists(ordered_sections, dedupe=dedupe)
+        positive = join_anima_prompt_parts(
+            [prefix, composed_text, suffix],
+            dedupe=dedupe,
+            allow_artist=True,
+        )
+        characters = []
     negative_prompt = join_prompt_parts([negative], dedupe=dedupe)
     metadata = {
         "quality": quality,
@@ -651,6 +809,11 @@ def compose_character_prompt(
         "prefix": prefix,
         "suffix": suffix,
         "dedupe": dedupe,
+        "multi_character_mode": multi_character_mode,
+        "multi_character_enabled": bool(scoped_requested),
+        "character_separator": character_separator,
+        "artist_tags": artist_tags,
+        "characters": characters,
         "sections": [section for _, section in ordered_sections],
     }
     return (positive, negative_prompt, _metadata_json(metadata))
@@ -661,6 +824,7 @@ class GaliaisNodesCharacterIdentity(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "主体人数": combo("identity_subject"),
                 "角色": combo("identity_character"),
                 "作品": combo("identity_work"),
@@ -680,7 +844,8 @@ class GaliaisNodesCharacterIdentity(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 主体人数, 角色, 作品, 画师, 年龄身份, 身份补充, 启用, 权重, 使用主体人数, 使用角色, 使用作品, 使用画师, 使用年龄身份, 使用身份补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 主体人数, 角色, 作品, 画师, 年龄身份, 身份补充, 启用, 权重, 使用主体人数, 使用角色, 使用作品, 使用画师, 使用年龄身份, 使用身份补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -713,6 +878,7 @@ class GaliaisNodesCharacterIdentity(_RuntimeRandomRefreshMixin):
         )
         section["artist"] = normalize_artist_tag(values.get("identity_artist", ""), db_path=db_path)
         section["artist_inserted_before_subject"] = bool(section["artist"])
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["fields"] = _field_switch_metadata(
             ("identity_subject", "主体人数", 使用主体人数),
             ("identity_character", "角色", 使用角色),
@@ -740,6 +906,7 @@ class GaliaisNodesCharacterFaceHairEyes(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "头发": combo("face_hair"),
                 "眼睛视线": combo("face_eyes"),
                 "脸部五官": combo("face_face"),
@@ -758,7 +925,8 @@ class GaliaisNodesCharacterFaceHairEyes(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 头发, 眼睛视线, 脸部五官, 情绪表情, 脸发眼补充, 启用, 权重, 使用头发, 使用眼睛视线, 使用脸部五官, 使用情绪表情, 使用脸发眼补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 头发, 眼睛视线, 脸部五官, 情绪表情, 脸发眼补充, 启用, 权重, 使用头发, 使用眼睛视线, 使用脸部五官, 使用情绪表情, 使用脸发眼补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -795,6 +963,7 @@ class GaliaisNodesCharacterFaceHairEyes(_RuntimeRandomRefreshMixin):
             ("face_expression", "情绪表情", 使用情绪表情),
             ("face_note", "脸发眼补充", 使用脸发眼补充),
         )
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["random"] = random_meta
         return _section_result(
             section,
@@ -813,6 +982,7 @@ class GaliaisNodesCharacterBody(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "体型比例": combo("body_shape"),
                 "四肢躯干": combo("body_limbs"),
                 "皮肤质感": combo("body_skin"),
@@ -831,7 +1001,8 @@ class GaliaisNodesCharacterBody(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 体型比例, 四肢躯干, 皮肤质感, 非人身体, 身体补充, 启用, 权重, 使用体型比例, 使用四肢躯干, 使用皮肤质感, 使用非人身体, 使用身体补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 体型比例, 四肢躯干, 皮肤质感, 非人身体, 身体补充, 启用, 权重, 使用体型比例, 使用四肢躯干, 使用皮肤质感, 使用非人身体, 使用身体补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -868,6 +1039,7 @@ class GaliaisNodesCharacterBody(_RuntimeRandomRefreshMixin):
             ("body_nonhuman", "非人身体", 使用非人身体),
             ("body_note", "身体补充", 使用身体补充),
         )
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["random"] = random_meta
         return _section_result(
             section,
@@ -886,6 +1058,7 @@ class GaliaisNodesCharacterOutfit(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "上装外套": combo("outfit_upper"),
                 "下装鞋袜": combo("outfit_lower"),
                 "连体贴身": combo("outfit_onepiece"),
@@ -906,7 +1079,8 @@ class GaliaisNodesCharacterOutfit(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 上装外套, 下装鞋袜, 连体贴身, 配饰, 材质细节, 穿着状态, 服装补充, 启用, 权重, 使用上装外套, 使用下装鞋袜, 使用连体贴身, 使用配饰, 使用材质细节, 使用穿着状态, 使用服装补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 上装外套, 下装鞋袜, 连体贴身, 配饰, 材质细节, 穿着状态, 服装补充, 启用, 权重, 使用上装外套, 使用下装鞋袜, 使用连体贴身, 使用配饰, 使用材质细节, 使用穿着状态, 使用服装补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -949,6 +1123,7 @@ class GaliaisNodesCharacterOutfit(_RuntimeRandomRefreshMixin):
             ("outfit_state", "穿着状态", 使用穿着状态),
             ("outfit_note", "服装补充", 使用服装补充),
         )
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["random"] = random_meta
         return _section_result(
             section,
@@ -969,6 +1144,7 @@ class GaliaisNodesCharacterPoseAction(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "整体姿态": combo("pose_posture"),
                 "肢体手势": combo("pose_gesture"),
                 "动作行为": combo("pose_action"),
@@ -987,7 +1163,8 @@ class GaliaisNodesCharacterPoseAction(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 整体姿态, 肢体手势, 动作行为, 互动关系, 姿势补充, 启用, 权重, 使用整体姿态, 使用肢体手势, 使用动作行为, 使用互动关系, 使用姿势补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 整体姿态, 肢体手势, 动作行为, 互动关系, 姿势补充, 启用, 权重, 使用整体姿态, 使用肢体手势, 使用动作行为, 使用互动关系, 使用姿势补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -1024,6 +1201,7 @@ class GaliaisNodesCharacterPoseAction(_RuntimeRandomRefreshMixin):
             ("pose_interaction", "互动关系", 使用互动关系),
             ("pose_note", "姿势补充", 使用姿势补充),
         )
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["random"] = random_meta
         return _section_result(
             section,
@@ -1042,6 +1220,7 @@ class GaliaisNodesCharacterSceneStyle(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "镜头构图": combo("scene_camera"),
                 "地点背景": combo("scene_location"),
                 "时间天气": combo("scene_time_weather"),
@@ -1061,7 +1240,8 @@ class GaliaisNodesCharacterSceneStyle(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 镜头构图, 地点背景, 时间天气, 道具生物, 画面风格, 场景补充, 启用, 权重, 使用镜头构图, 使用地点背景, 使用时间天气, 使用道具生物, 使用画面风格, 使用场景补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 镜头构图, 地点背景, 时间天气, 道具生物, 画面风格, 场景补充, 启用, 权重, 使用镜头构图, 使用地点背景, 使用时间天气, 使用道具生物, 使用画面风格, 使用场景补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -1101,6 +1281,7 @@ class GaliaisNodesCharacterSceneStyle(_RuntimeRandomRefreshMixin):
             ("scene_visual_style", "画面风格", 使用画面风格),
             ("scene_note", "场景补充", 使用场景补充),
         )
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["random"] = random_meta
         return _section_result(
             section,
@@ -1120,6 +1301,7 @@ class GaliaisNodesCharacterNSFW(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "裸露": combo("nsfw_exposure"),
                 "露骨身体": combo("nsfw_body"),
                 "性行为": combo("nsfw_act"),
@@ -1139,7 +1321,8 @@ class GaliaisNodesCharacterNSFW(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 裸露, 露骨身体, 性行为, 成人主题, 性癖道具, NSFW补充, 启用, 权重, 使用裸露, 使用露骨身体, 使用性行为, 使用成人主题, 使用性癖道具, 使用NSFW补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 裸露, 露骨身体, 性行为, 成人主题, 性癖道具, NSFW补充, 启用, 权重, 使用裸露, 使用露骨身体, 使用性行为, 使用成人主题, 使用性癖道具, 使用NSFW补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -1179,6 +1362,7 @@ class GaliaisNodesCharacterNSFW(_RuntimeRandomRefreshMixin):
             ("nsfw_fetish_object", "性癖道具", 使用性癖道具),
             ("nsfw_note", "NSFW补充", 使用NSFW补充),
         )
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["random"] = random_meta
         return _section_result(
             section,
@@ -1198,6 +1382,7 @@ class GaliaisNodesCharacterNarrative(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "关系事件": combo("narrative_relationship"),
                 "主题状态": combo("narrative_theme_state"),
                 "引用梗": combo("meta_reference"),
@@ -1215,7 +1400,8 @@ class GaliaisNodesCharacterNarrative(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 关系事件, 主题状态, 引用梗, 叙事补充, 启用, 权重, 使用关系事件, 使用主题状态, 使用引用梗, 使用叙事补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 关系事件, 主题状态, 引用梗, 叙事补充, 启用, 权重, 使用关系事件, 使用主题状态, 使用引用梗, 使用叙事补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -1249,6 +1435,7 @@ class GaliaisNodesCharacterNarrative(_RuntimeRandomRefreshMixin):
             ("meta_reference", "引用梗", 使用引用梗),
             ("narrative_note", "叙事补充", 使用叙事补充),
         )
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["random"] = random_meta
         return _section_result(
             section,
@@ -1266,6 +1453,7 @@ class GaliaisNodesCharacterObjectSupplement(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "场景物件": combo("scene_object"),
                 "媒介文档": combo("object_media_document"),
                 "道具补充": combo("object_prop_extra"),
@@ -1283,7 +1471,8 @@ class GaliaisNodesCharacterObjectSupplement(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 场景物件, 媒介文档, 道具补充, 物件补充, 启用, 权重, 使用场景物件, 使用媒介文档, 使用道具补充, 使用物件补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 场景物件, 媒介文档, 道具补充, 物件补充, 启用, 权重, 使用场景物件, 使用媒介文档, 使用道具补充, 使用物件补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -1317,6 +1506,7 @@ class GaliaisNodesCharacterObjectSupplement(_RuntimeRandomRefreshMixin):
             ("object_prop_extra", "道具补充", 使用道具补充),
             ("object_note", "物件补充", 使用物件补充),
         )
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["random"] = random_meta
         return _section_result(
             section,
@@ -1334,6 +1524,7 @@ class GaliaisNodesCharacterMetaTechnical(_RuntimeRandomRefreshMixin):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                **character_scope_controls(),
                 "管理质量": combo("meta_admin_quality"),
                 "技术规格": combo("meta_technical"),
                 "覆盖处理": combo("meta_overlay_process"),
@@ -1352,7 +1543,8 @@ class GaliaisNodesCharacterMetaTechnical(_RuntimeRandomRefreshMixin):
     FUNCTION = "run"
     CATEGORY = "GALIAIS-Nodes/character"
 
-    def run(self, 管理质量, 技术规格, 覆盖处理, 待复审, Meta补充, 启用, 权重, 使用管理质量, 使用技术规格, 使用覆盖处理, 使用待复审, 使用Meta补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None):
+    def run(self, 管理质量, 技术规格, 覆盖处理, 待复审, Meta补充, 启用, 权重, 使用管理质量, 使用技术规格, 使用覆盖处理, 使用待复审, 使用Meta补充, 启用随机Tag, 随机策略, 每字段随机数, 随机种子, 随机允许NSFW, 随机最低热度, DB=None, 角色槽位="全局", 角色标签=""):
+        DB, 角色槽位, 角色标签 = _resolve_legacy_scope_args(DB, 角色槽位, 角色标签)
         db_path = optional_danbooru_db_path(db=DB)
         values, random_meta = _apply_random_fields(
             _random_field_values(
@@ -1389,6 +1581,7 @@ class GaliaisNodesCharacterMetaTechnical(_RuntimeRandomRefreshMixin):
             ("uncertain_review", "待复审", 使用待复审),
             ("meta_note", "Meta补充", 使用Meta补充),
         )
+        _apply_character_scope(section, 角色槽位, 角色标签)
         section["random"] = random_meta
         return _section_result(
             section,
@@ -1414,6 +1607,8 @@ class GaliaisNodesCharacterComposer:
                 "质量预设": (list(GALIAIS_NODES_QUALITY_PRESETS.keys()), {"default": "无"}),
                 "负面预设": (list(GALIAIS_NODES_NEGATIVE_PRESETS.keys()), {"default": "无"}),
                 "去重": ("BOOLEAN", {"default": True}),
+                "多角色模式": (["自动", "开启", "关闭"], {"default": "自动"}),
+                "角色分隔": (CHARACTER_SEPARATOR_OPTIONS, {"default": "分号"}),
                 "额外前缀": ("STRING", {"default": "", "multiline": True}),
                 "额外后缀": ("STRING", {"default": "", "multiline": True}),
             },
@@ -1432,6 +1627,8 @@ class GaliaisNodesCharacterComposer:
         质量预设,
         负面预设,
         去重,
+        多角色模式,
+        角色分隔,
         额外前缀,
         额外后缀,
         角色段1=None,
@@ -1478,6 +1675,8 @@ class GaliaisNodesCharacterComposer:
             prefix=额外前缀,
             suffix=额外后缀,
             dedupe=去重,
+            multi_character_mode=多角色模式,
+            character_separator=角色分隔,
         )
 
 

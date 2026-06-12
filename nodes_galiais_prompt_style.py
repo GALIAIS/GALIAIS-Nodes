@@ -197,7 +197,7 @@ def _random_ui_payload(random_meta: dict, mapping: dict[str, str]) -> dict:
         if field in field_values
     }
     if not widgets:
-        return {}
+        return {"galiais_random_fields": []}
     return {"galiais_random_fields": [widgets]}
 
 

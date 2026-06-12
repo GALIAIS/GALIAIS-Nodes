@@ -3769,6 +3769,8 @@ class GaliaisNodesDanbooruTaxonomySelect:
         result = (text, _metadata_json(metadata))
         if random_field_value:
             return {"ui": {"galiais_random_fields": [{"Tags": random_field_value}]}, "result": result}
+        if 启用随机Tag:
+            return {"ui": {"galiais_random_fields": []}, "result": result}
         return result
 
 

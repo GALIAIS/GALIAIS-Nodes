@@ -8,10 +8,12 @@ const TREE_CACHE_LIMIT = 120;
 const CANVAS_BUTTON_WIDTH = 62;
 const CANVAS_BUTTON_HEIGHT = 22;
 const CANVAS_BUTTON_MARGIN = 12;
+const FIELD_ENABLE_CANVAS_RESERVED_WIDTH = 66;
 const SELECTOR_BUTTON_NAME = "DB词典";
 const DB_FILE_BUTTON_NAME = "选择DB文件";
 const AI_MODELS_BUTTON_NAME = "获取模型";
 const FIELD_ENABLE_TOGGLE_CLASS = "galiais-field-enable-toggle";
+const FIELD_ENABLE_CANVAS_TOGGLE_CLASS = "galiais-field-enable-canvas-toggle";
 const FIELD_ENABLE_ROW_CLASS = "galiais-field-enable-row";
 const FIELD_ENABLE_DISABLED_CLASS = "is-galiais-field-disabled";
 const RECENT_TAGS_KEY = "galiais_nodes_recent_tags";
@@ -20,8 +22,13 @@ const LOCAL_TAG_LIMIT = 200;
 const optionPageCache = new Map();
 const treePayloadCache = new Map();
 const fieldEnableDomNodes = new Set();
+const legacyCanvasToggleNodes = new Set();
+const legacyCanvasToggleElements = new Map();
 let fieldEnableMutationObserver = null;
 let fieldEnableRenderFrame = null;
+let legacyCanvasToggleFrame = null;
+let legacyCanvasPointerHandlerInstalled = false;
+let legacyCanvasLastToggle = null;
 const FALLBACK_FIELD_MAP = {
     GaliaisNodesCharacterIdentity: {
         "主体人数": "identity_subject",
@@ -587,6 +594,35 @@ function ensureStyles() {
     border-color: #e7bf71;
     filter: brightness(1.06);
 }
+.galiais-field-enable-canvas-toggle {
+    position: fixed;
+    z-index: 9998;
+    width: 46px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid #5c6573;
+    border-radius: 5px;
+    background: #242b36;
+    color: #aeb8c5;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font: 650 11px/1 ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif;
+    white-space: nowrap;
+    pointer-events: auto;
+    user-select: none;
+    box-sizing: border-box;
+}
+.galiais-field-enable-canvas-toggle.is-on {
+    border-color: #e7bf71;
+    background: #d8ad5b;
+    color: #17140f;
+}
+.galiais-field-enable-canvas-toggle:hover {
+    border-color: #e7bf71;
+    filter: brightness(1.06);
+}
 @media (max-width: 640px) {
     .galiais-nodes-danbooru-header,
     .galiais-nodes-danbooru-footer {
@@ -760,6 +796,10 @@ function findWidget(node, name) {
 
 function nodeTypeName(node) {
     return node?.type || node?.constructor?.type || node?.constructor?.name || "";
+}
+
+function isVueNodeMode(node) {
+    return !!vueNodeElement(node);
 }
 
 function findDanbooruDbPath() {
@@ -1092,6 +1132,78 @@ function ensureVueFieldEnableToggles(node) {
     window.setTimeout(() => scheduleVueFieldEnableToggles(node), 250);
 }
 
+function legacyCanvasNodeKey(node) {
+    if (!node) return "";
+    if (node.id !== undefined && node.id !== null) return String(node.id);
+    if (!node._galiaisLegacyCanvasKey) {
+        node._galiaisLegacyCanvasKey = `transient-${Math.random().toString(36).slice(2)}`;
+    }
+    return node._galiaisLegacyCanvasKey;
+}
+
+function legacyCanvasToggleKey(node, targetName) {
+    return `${legacyCanvasNodeKey(node)}:${String(targetName || "")}`;
+}
+
+function removeLegacyCanvasFieldEnableToggles(node) {
+    for (const [key, entry] of Array.from(legacyCanvasToggleElements.entries())) {
+        if (node && entry.node !== node) continue;
+        entry.button.remove();
+        legacyCanvasToggleElements.delete(key);
+    }
+    if (node) legacyCanvasToggleNodes.delete(node);
+}
+
+function nodeBelongsToCurrentGraph(node) {
+    const graph = app.canvas?.graph || app.graph;
+    return !graph || !node?.graph || node.graph === graph;
+}
+
+function patchLegacyCanvasWidgetDraw(widget) {
+    if (!widget || widget._galiaisCanvasDrawPatched || typeof widget.draw !== "function") return;
+    widget._galiaisCanvasReservedWidth = FIELD_ENABLE_CANVAS_RESERVED_WIDTH;
+    widget._galiaisOriginalDraw = widget._galiaisOriginalDraw || widget.draw;
+    widget.draw = function (ctx, nodeArg, width, y, height, lowQuality) {
+        const enabled = widget._galiaisFieldEnabled !== false;
+        const reserved = Number(widget._galiaisCanvasReservedWidth || 0);
+        const drawWidth = Math.max(80, Number(width || 0) - reserved);
+        let output;
+        if (enabled) {
+            output = widget._galiaisOriginalDraw.call(this, ctx, nodeArg, drawWidth, y, height, lowQuality);
+        } else {
+            ctx.save();
+            ctx.globalAlpha *= 0.48;
+            output = widget._galiaisOriginalDraw.call(this, ctx, nodeArg, drawWidth, y, height, lowQuality);
+            ctx.restore();
+        }
+        return output;
+    };
+    widget._galiaisCanvasDrawPatched = true;
+}
+
+function ensureLegacyCanvasFieldEnableLayout(node, fieldEnablePairs) {
+    if (!node || isVueNodeMode(node)) return false;
+    ensureStyles();
+    let changed = false;
+    for (const pair of fieldEnablePairs || []) {
+        const widget = pair?.widget;
+        if (!widget) continue;
+        patchLegacyCanvasWidgetDraw(widget);
+        if (widget._galiaisCanvasReservedWidth !== FIELD_ENABLE_CANVAS_RESERVED_WIDTH) {
+            widget._galiaisCanvasReservedWidth = FIELD_ENABLE_CANVAS_RESERVED_WIDTH;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+function fieldEnableToggleY(widget) {
+    if (!widget) return null;
+    const value = widget.last_y ?? widget.y;
+    if (value === undefined || value === null) return null;
+    return Number(value || 0);
+}
+
 function ensureFieldEnableDrawLayer(node) {
     if (!node || node._galiaisFieldEnableDrawLayer || typeof node.drawWidgets !== "function") return;
     const originalDrawWidgets = node.drawWidgets;
@@ -1107,7 +1219,9 @@ function applyFieldEnableDimState(node, fieldEnablePairs) {
     for (const pair of fieldEnablePairs || []) {
         const { widget } = pair;
         if (!widget) continue;
-        if (!widget._galiaisOriginalDraw && typeof widget.draw === "function") {
+        if (!isVueNodeMode(node)) {
+            patchLegacyCanvasWidgetDraw(widget);
+        } else if (!widget._galiaisOriginalDraw && typeof widget.draw === "function") {
             widget._galiaisOriginalDraw = widget.draw;
             widget.draw = function (ctx, nodeArg, width, y, height, lowQuality) {
                 const enabled = widget._galiaisFieldEnabled !== false;
@@ -1129,12 +1243,13 @@ function applyFieldEnableDimState(node, fieldEnablePairs) {
 }
 
 function fieldEnableToggleRect(node, widget) {
-    if (!node || !widget || widget.last_y === undefined) return null;
+    const y = fieldEnableToggleY(widget);
+    if (!node || !widget || y === null) return null;
     const height = Math.max(20, Math.min(24, Number(widget.computedHeight || 24) - 5));
     const width = 46;
     return {
         x: Math.max(12, Number(node.size?.[0] || 0) - width - 14),
-        y: Number(widget.last_y || 0) + Math.max(2, (Number(widget.computedHeight || 24) - height) / 2 - 1),
+        y: y + Math.max(2, (Number(widget.computedHeight || 24) - height) / 2 - 1),
         w: width,
         h: height,
     };
@@ -1204,6 +1319,208 @@ function toggleFieldEnableAtPosition(node, pos, fieldEnablePairs) {
         return true;
     }
     return false;
+}
+
+function eventToCanvasPosition(event) {
+    const canvas = app.canvas;
+    const ds = canvas?.ds;
+    const element = canvas?.canvas;
+    if (!event || !element || !ds) return null;
+    const rect = element.getBoundingClientRect();
+    const scale = Number(ds.scale || 1) || 1;
+    return [
+        (event.clientX - rect.left) / scale - Number(ds.offset?.[0] || 0),
+        (event.clientY - rect.top) / scale - Number(ds.offset?.[1] || 0),
+    ];
+}
+
+function nodeLocalPositionFromCanvas(node, canvasPos) {
+    if (!node || !Array.isArray(canvasPos) || !Array.isArray(node.pos)) return null;
+    return [
+        canvasPos[0] - Number(node.pos[0] || 0),
+        canvasPos[1] - Number(node.pos[1] || 0),
+    ];
+}
+
+function canvasRectToClientRect(node, rect) {
+    const canvas = app.canvas;
+    const ds = canvas?.ds;
+    const element = canvas?.canvas;
+    if (!node || !rect || !ds || !element || !Array.isArray(node.pos)) return null;
+    const canvasRect = element.getBoundingClientRect();
+    const scale = Number(ds.scale || 1) || 1;
+    const offsetX = Number(ds.offset?.[0] || 0);
+    const offsetY = Number(ds.offset?.[1] || 0);
+    return {
+        left: canvasRect.left + (Number(node.pos[0] || 0) + rect.x + offsetX) * scale,
+        top: canvasRect.top + (Number(node.pos[1] || 0) + rect.y + offsetY) * scale,
+        width: rect.w * scale,
+        height: rect.h * scale,
+    };
+}
+
+function isNodeVisibleOnCanvas(node) {
+    const canvas = app.canvas;
+    if (!node) return false;
+    if (typeof canvas?.isNodeVisible === "function") {
+        try {
+            return canvas.isNodeVisible(node);
+        } catch (_) {
+            return true;
+        }
+    }
+    return true;
+}
+
+function applyLegacyCanvasToggleState(button, pair) {
+    const enabled = isFieldEnabled(pair.enableWidget);
+    button.className = `${FIELD_ENABLE_CANVAS_TOGGLE_CLASS} ${enabled ? "is-on" : "is-off"}`;
+    button.textContent = enabled ? "启用" : "关闭";
+    button.dataset.fieldName = pair.targetName;
+    button.setAttribute("aria-label", `${pair.targetName}${enabled ? "已启用" : "已关闭"}`);
+    button.title = `${pair.targetName}: ${enabled ? "启用" : "关闭"}`;
+}
+
+function ensureLegacyCanvasFieldEnableButton(node, pair) {
+    const key = legacyCanvasToggleKey(node, pair.targetName);
+    let entry = legacyCanvasToggleElements.get(key);
+    if (!entry) {
+        const button = document.createElement("button");
+        button.type = "button";
+        const toggle = (event) => {
+            const currentPair = buildFieldEnablePairs(node).find((item) => item.targetName === button.dataset.fieldName);
+            if (!currentPair) return;
+            const pairs = buildFieldEnablePairs(node);
+            setWidgetValue(currentPair.enableWidget, !isFieldEnabled(currentPair.enableWidget));
+            applyFieldEnableDimState(node, pairs);
+            updateLegacyCanvasFieldEnableToggles(node);
+            legacyCanvasLastToggle = { time: Date.now(), node };
+            app.graph?.setDirtyCanvas(true, true);
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+            event?.stopImmediatePropagation?.();
+        };
+        button.addEventListener("pointerdown", (event) => {
+            button._galiaisPointerToggledAt = Date.now();
+            toggle(event);
+        });
+        button.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+        });
+        button.addEventListener("click", (event) => {
+            const pointerHandled = Date.now() - Number(button._galiaisPointerToggledAt || 0) < 250;
+            if (!pointerHandled) toggle(event);
+            event.preventDefault();
+            event.stopPropagation();
+        });
+        document.body.appendChild(button);
+        entry = { node, button };
+        legacyCanvasToggleElements.set(key, entry);
+    }
+    entry.node = node;
+    applyLegacyCanvasToggleState(entry.button, pair);
+    return entry.button;
+}
+
+function updateLegacyCanvasFieldEnableToggles(node) {
+    if (!node) return false;
+    if (isVueNodeMode(node) || node.flags?.collapsed || !nodeBelongsToCurrentGraph(node)) {
+        removeLegacyCanvasFieldEnableToggles(node);
+        return false;
+    }
+
+    ensureStyles();
+    const fieldEnablePairs = buildFieldEnablePairs(node);
+    hideFieldEnableWidgets(node, fieldEnablePairs);
+    applyFieldEnableDimState(node, fieldEnablePairs);
+    ensureLegacyCanvasFieldEnableLayout(node, fieldEnablePairs);
+
+    const expectedKeys = new Set();
+    const visible = isNodeVisibleOnCanvas(node);
+    for (const pair of fieldEnablePairs) {
+        const rect = fieldEnableToggleRect(node, pair.widget);
+        const clientRect = rect ? canvasRectToClientRect(node, rect) : null;
+        const key = legacyCanvasToggleKey(node, pair.targetName);
+        expectedKeys.add(key);
+        const button = ensureLegacyCanvasFieldEnableButton(node, pair);
+        if (!visible || !clientRect) {
+            button.style.display = "none";
+            continue;
+        }
+        button.style.left = `${clientRect.left}px`;
+        button.style.top = `${clientRect.top}px`;
+        button.style.width = `${Math.max(36, clientRect.width)}px`;
+        button.style.height = `${Math.max(18, clientRect.height)}px`;
+        button.style.display = "flex";
+    }
+
+    for (const [key, entry] of Array.from(legacyCanvasToggleElements.entries())) {
+        if (entry.node === node && !expectedKeys.has(key)) {
+            entry.button.remove();
+            legacyCanvasToggleElements.delete(key);
+        }
+    }
+    return fieldEnablePairs.length > 0;
+}
+
+function flushLegacyCanvasFieldEnableToggles() {
+    legacyCanvasToggleFrame = null;
+    for (const node of Array.from(legacyCanvasToggleNodes)) {
+        if (!node || node.graph === null || !nodeBelongsToCurrentGraph(node)) {
+            removeLegacyCanvasFieldEnableToggles(node);
+            continue;
+        }
+        updateLegacyCanvasFieldEnableToggles(node);
+    }
+}
+
+function scheduleLegacyCanvasFieldEnableToggles(node) {
+    if (node) legacyCanvasToggleNodes.add(node);
+    if (legacyCanvasToggleFrame !== null) return;
+    const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
+    legacyCanvasToggleFrame = schedule(flushLegacyCanvasFieldEnableToggles);
+}
+
+function handleLegacyCanvasFieldTogglePointer(event) {
+    if (event?.button !== undefined && event.button !== 0) return;
+    const canvasPos = eventToCanvasPosition(event);
+    if (!canvasPos) return;
+    const nodes = app.graph?._nodes || [];
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+        const node = nodes[index];
+        if (!node || isVueNodeMode(node) || node.flags?.collapsed) continue;
+        const nodePos = nodeLocalPositionFromCanvas(node, canvasPos);
+        if (!nodePos) continue;
+        const width = Number(node.size?.[0] || 0);
+        const height = Number(node.size?.[1] || 0);
+        if (nodePos[0] < 0 || nodePos[1] < 0 || nodePos[0] > width || nodePos[1] > height) continue;
+        const pairs = buildFieldEnablePairs(node);
+        if (!pairs.length) continue;
+        if (!toggleFieldEnableAtPosition(node, nodePos, pairs)) continue;
+        legacyCanvasLastToggle = { time: Date.now(), node };
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        event.stopImmediatePropagation?.();
+        return true;
+    }
+}
+
+function ensureLegacyCanvasPointerHandler() {
+    if (legacyCanvasPointerHandlerInstalled) return;
+    const install = () => {
+        const element = app.canvas?.canvas;
+        if (!element || legacyCanvasPointerHandlerInstalled) return;
+        element.addEventListener("pointerdown", handleLegacyCanvasFieldTogglePointer, true);
+        element.addEventListener("mousedown", handleLegacyCanvasFieldTogglePointer, true);
+        element.addEventListener("pointermove", () => scheduleLegacyCanvasFieldEnableToggles(), { passive: true });
+        element.addEventListener("wheel", () => scheduleLegacyCanvasFieldEnableToggles(), { passive: true });
+        window.addEventListener("resize", () => scheduleLegacyCanvasFieldEnableToggles(), { passive: true });
+        legacyCanvasPointerHandlerInstalled = true;
+    };
+    install();
+    window.setTimeout(install, 250);
+    window.setTimeout(install, 1000);
 }
 
 function resolveSelectorField(item) {
@@ -1446,6 +1763,8 @@ function ensureRandomFieldsWidget(node) {
 }
 
 function updateRandomFieldsWidget(node, message) {
+    const hasRandomFieldPayload = Object.prototype.hasOwnProperty.call(message || {}, "galiais_random_fields");
+    if (!hasRandomFieldPayload) return false;
     const batches = Array.isArray(message?.galiais_random_fields) ? message.galiais_random_fields : [];
     const entries = [];
     for (const batch of batches) {
@@ -2592,12 +2911,19 @@ app.registerExtension({
         function scrubNode(node) {
             const fieldEnablePairs = buildFieldEnablePairs(node);
             ensureFieldEnableDrawLayer(node);
+            ensureLegacyCanvasPointerHandler();
             const removedWidgets = removeLegacySelectorWidgets(node);
             const cleanedValues = cleanLegacyWidgetValues(node);
             const hiddenEnableWidgets = hideFieldEnableWidgets(node, fieldEnablePairs);
+            const legacyCanvasLayoutChanged = ensureLegacyCanvasFieldEnableLayout(node, fieldEnablePairs);
             applyFieldEnableDimState(node, fieldEnablePairs);
             ensureVueFieldEnableToggles(node);
-            return removedWidgets || cleanedValues || hiddenEnableWidgets;
+            if (isVueNodeMode(node)) {
+                removeLegacyCanvasFieldEnableToggles(node);
+            } else {
+                scheduleLegacyCanvasFieldEnableToggles(node);
+            }
+            return removedWidgets || cleanedValues || hiddenEnableWidgets || legacyCanvasLayoutChanged;
         }
 
         const onConfigure = nodeType.prototype.onConfigure;
@@ -2641,20 +2967,35 @@ app.registerExtension({
         nodeType.prototype.onDrawForeground = function (ctx) {
             onDrawForeground?.apply(this, arguments);
             ensureVueFieldEnableToggles(this);
-            if (selectorFieldsForNode(this, lazyFields).length) {
+            if (isVueNodeMode(this)) {
+                removeLegacyCanvasFieldEnableToggles(this);
+            } else {
+                scheduleLegacyCanvasFieldEnableToggles(this);
+            }
+            if (isVueNodeMode(this) && selectorFieldsForNode(this, lazyFields).length) {
                 drawCanvasSelectButton(this, ctx);
             }
         };
 
+        const onRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function () {
+            removeLegacyCanvasFieldEnableToggles(this);
+            onRemoved?.apply(this, arguments);
+        };
+
         const onMouseDown = nodeType.prototype.onMouseDown;
         nodeType.prototype.onMouseDown = function (event, pos) {
+            if (legacyCanvasLastToggle?.node === this && Date.now() - legacyCanvasLastToggle.time < 80) {
+                return true;
+            }
             const fieldEnablePairs = buildFieldEnablePairs(this);
-            if (!vueNodeElement(this) && toggleFieldEnableAtPosition(this, pos, fieldEnablePairs)) {
+            if (!isVueNodeMode(this) && toggleFieldEnableAtPosition(this, pos, fieldEnablePairs)) {
                 event?.preventDefault?.();
                 event?.stopPropagation?.();
                 return true;
             }
             if (
+                isVueNodeMode(this) &&
                 selectorFieldsForNode(this, lazyFields).length &&
                 isInsideRect(pos, canvasSelectButtonRect(this))
             ) {
