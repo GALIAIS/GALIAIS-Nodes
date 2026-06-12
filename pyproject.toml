@@ -1,6 +1,6 @@
 [project]
 name = "galiais-nodes"
-version = "1.0.1"
+version = "1.0.0"
 description = "Prompt engineering, Danbooru dictionary lookup, and AI prompt refinement nodes for ComfyUI."
 readme = "README.md"
 requires-python = ">=3.10"
