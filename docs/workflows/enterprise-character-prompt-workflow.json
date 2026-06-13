@@ -1,0 +1,148 @@
+{
+  "name": "GALIAIS-Nodes enterprise character prompt workflow",
+  "schema_version": 1,
+  "description": "Reference connection plan for detailed character prompting with runtime DB, multi-character coordination, AI expansion, scene direction, and quality gate.",
+  "nodes": [
+    {
+      "id": "db_runtime_builder",
+      "type": "GaliaisNodesDanbooruRuntimeDBBuilder",
+      "title": "Build compact runtime DB from full dictionary when needed",
+      "required_when": "Use once after the full Danbooru DB changes."
+    },
+    {
+      "id": "db_loader",
+      "type": "GaliaisNodesDanbooruDBLoader",
+      "title": "Load runtime Danbooru DB",
+      "outputs": ["DB", "DB路径", "词典信息JSON"]
+    },
+    {
+      "id": "ai_provider",
+      "type": "GaliaisNodesAIProvider",
+      "title": "OpenAI-compatible AI provider",
+      "notes": "Enable service_tier fast, retry, stream fallback, and optional cache when provider supports them."
+    },
+    {
+      "id": "ai_health",
+      "type": "GaliaisNodesAIProviderHealthCheck",
+      "title": "Provider health check",
+      "connect": {
+        "AI服务商": "ai_provider.AI服务商"
+      }
+    },
+    {
+      "id": "identity_role1",
+      "type": "GaliaisNodesCharacterIdentity",
+      "title": "Role 1 identity",
+      "connect": {
+        "DB": "db_loader.DB",
+        "AI服务商": "ai_provider.AI服务商"
+      },
+      "settings": {
+        "角色槽位": "角色1"
+      }
+    },
+    {
+      "id": "outfit_role1",
+      "type": "GaliaisNodesCharacterOutfit",
+      "title": "Role 1 outfit",
+      "connect": {
+        "DB": "db_loader.DB",
+        "AI服务商": "ai_provider.AI服务商",
+        "上游上下文": "identity_role1.文本",
+        "上游提示词段": "identity_role1.角色段"
+      },
+      "settings": {
+        "角色槽位": "角色1"
+      }
+    },
+    {
+      "id": "pose_role1",
+      "type": "GaliaisNodesCharacterPoseAction",
+      "title": "Role 1 pose/action",
+      "connect": {
+        "DB": "db_loader.DB",
+        "AI服务商": "ai_provider.AI服务商",
+        "上游上下文": "outfit_role1.文本",
+        "上游提示词段": "outfit_role1.角色段"
+      },
+      "settings": {
+        "角色槽位": "角色1"
+      }
+    },
+    {
+      "id": "scene",
+      "type": "GaliaisNodesCharacterSceneStyle",
+      "title": "Global scene tags",
+      "connect": {
+        "DB": "db_loader.DB",
+        "AI服务商": "ai_provider.AI服务商",
+        "上游上下文": "pose_role1.文本",
+        "上游提示词段": "pose_role1.角色段"
+      },
+      "settings": {
+        "角色槽位": "全局"
+      }
+    },
+    {
+      "id": "multi_character",
+      "type": "GaliaisNodesMultiCharacterCoordinator",
+      "title": "Optional multi-character layout and relation coordinator",
+      "connect": {
+        "提示词段1": "identity_role1.角色段",
+        "提示词段2": "outfit_role1.角色段",
+        "提示词段3": "pose_role1.角色段",
+        "提示词段4": "scene.场景段"
+      }
+    },
+    {
+      "id": "composer",
+      "type": "GaliaisNodesCharacterComposer",
+      "title": "Final tag composer",
+      "connect": {
+        "提示词段1": "identity_role1.角色段",
+        "提示词段2": "outfit_role1.角色段",
+        "提示词段3": "pose_role1.角色段",
+        "提示词段4": "scene.场景段",
+        "提示词段5": "multi_character.多角色叙事段"
+      }
+    },
+    {
+      "id": "scene_director",
+      "type": "GaliaisNodesSceneDirector",
+      "title": "Layered scene natural language",
+      "connect": {
+        "正面提示词": "composer.正面提示词",
+        "DB": "db_loader.DB"
+      }
+    },
+    {
+      "id": "orchestrator",
+      "type": "GaliaisNodesPromptOrchestrator",
+      "title": "Conflict pruning, AI expansion, negative prompt, and score",
+      "connect": {
+        "AI服务商": "ai_provider.AI服务商",
+        "正面提示词": "composer.正面提示词",
+        "DB": "db_loader.DB"
+      }
+    },
+    {
+      "id": "quality_gate",
+      "type": "GaliaisNodesPromptQualityGate",
+      "title": "Actionable prompt quality gate",
+      "connect": {
+        "提示词": "orchestrator.最终正面提示词",
+        "DB": "db_loader.DB"
+      }
+    },
+    {
+      "id": "viewer",
+      "type": "GaliaisNodesPromptViewer",
+      "title": "Readable final output",
+      "connect": {
+        "正面提示词": "orchestrator.最终正面提示词",
+        "负面提示词": "orchestrator.最终负面提示词",
+        "元信息JSON": "orchestrator.流程JSON"
+      }
+    }
+  ]
+}

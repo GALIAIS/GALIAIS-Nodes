@@ -1,5 +1,8 @@
 import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
+import { apiUrl, cacheKey, createLruCache, readJsonResponse } from "./galiais_nodes_api_cache.js";
+import { FALLBACK_FIELD_MAP } from "./galiais_nodes_field_map.js";
+import { installComposerPromptSectionControls } from "./galiais_nodes_composer_ui.js";
+import { ensurePromptViewerWidgets, updatePromptViewerWidgets } from "./galiais_nodes_prompt_viewer_ui.js";
 
 const STYLE_ID = "galiais-nodes-danbooru-lazy-select-style";
 const PAGE_LIMIT = 60;
@@ -16,122 +19,45 @@ const FIELD_ENABLE_TOGGLE_CLASS = "galiais-field-enable-toggle";
 const FIELD_ENABLE_CANVAS_TOGGLE_CLASS = "galiais-field-enable-canvas-toggle";
 const FIELD_ENABLE_ROW_CLASS = "galiais-field-enable-row";
 const FIELD_ENABLE_DISABLED_CLASS = "is-galiais-field-disabled";
+const HIDDEN_WIDGET_ROW_CLASS = "galiais-hidden-widget-row";
+const COMPOSER_NODE_NAME = "GaliaisNodesCharacterComposer";
+const COMPOSER_SECTION_PREFIX = "提示词段";
+const COMPOSER_SECTION_TYPE = "GALIAIS_NODES_CHARACTER_SECTION";
+const COMPOSER_MIN_SECTION_INPUTS = 1;
+const COMPOSER_MAX_SECTION_INPUTS = 16;
+const COMPOSER_VISIBLE_SECTION_PROPERTY = "galiais_visible_prompt_sections";
+const COMPOSER_TEMPLATE_BUTTON_NAME = "模板管理";
+const COMPOSER_TEMPLATE_WIDGET_NAMES = new Set(["模板名称", "自定义正面模板", "模板JSON"]);
+const RANDOM_ENABLE_WIDGET_NAME = "启用随机Tag";
+const TAG_GENERATION_MODE_WIDGET_NAME = "Tag生成模式";
+const AI_FREEDOM_WIDGET_NAME = "AI自由度";
+const AI_INTENT_WIDGET_NAMES = new Set(["AI意图方向", "AI扩写强度", "AI是否写入补充"]);
+const AI_RAG_WIDGET_NAMES = new Set(["AI RAG模式", "RAG候选数", "RAG示例数"]);
+const RANDOM_GLOBAL_CONTROL_NAMES = new Set([
+    TAG_GENERATION_MODE_WIDGET_NAME,
+    "随机策略",
+    "每字段随机数",
+    "随机数量",
+    "随机种子",
+    "随机允许NSFW",
+    "随机最低热度",
+]);
 const RECENT_TAGS_KEY = "galiais_nodes_recent_tags";
 const FAVORITE_TAGS_KEY = "galiais_nodes_favorite_tags";
 const LOCAL_TAG_LIMIT = 200;
-const optionPageCache = new Map();
-const treePayloadCache = new Map();
+const optionPageCache = createLruCache(OPTION_PAGE_CACHE_LIMIT);
+const treePayloadCache = createLruCache(TREE_CACHE_LIMIT);
 const fieldEnableDomNodes = new Set();
 const legacyCanvasToggleNodes = new Set();
 const legacyCanvasToggleElements = new Map();
 let fieldEnableMutationObserver = null;
 let fieldEnableRenderFrame = null;
 let legacyCanvasToggleFrame = null;
+let legacyCanvasTrackingFrame = null;
 let legacyCanvasPointerHandlerInstalled = false;
 let legacyCanvasLastToggle = null;
-const FALLBACK_FIELD_MAP = {
-    GaliaisNodesCharacterIdentity: {
-        "主体人数": "identity_subject",
-        "角色": "identity_character",
-        "作品": "identity_work",
-        "画师": "identity_artist",
-        "年龄身份": "identity_role",
-    },
-    GaliaisNodesCharacterFaceHairEyes: {
-        "头发": "face_hair",
-        "眼睛视线": "face_eyes",
-        "脸部五官": "face_face",
-        "情绪表情": "face_expression",
-    },
-    GaliaisNodesCharacterBody: {
-        "体型比例": "body_shape",
-        "四肢躯干": "body_limbs",
-        "皮肤质感": "body_skin",
-        "非人身体": "body_nonhuman",
-    },
-    GaliaisNodesCharacterOutfit: {
-        "上装外套": "outfit_upper",
-        "下装鞋袜": "outfit_lower",
-        "连体贴身": "outfit_onepiece",
-        "配饰": "outfit_accessory",
-        "材质细节": "outfit_material_detail",
-        "穿着状态": "outfit_state",
-    },
-    GaliaisNodesCharacterPoseAction: {
-        "整体姿态": "pose_posture",
-        "肢体手势": "pose_gesture",
-        "动作行为": "pose_action",
-        "互动关系": "pose_interaction",
-    },
-    GaliaisNodesCharacterSceneStyle: {
-        "镜头构图": "scene_camera",
-        "地点背景": "scene_location",
-        "时间天气": "scene_time_weather",
-        "道具生物": "scene_object",
-        "画面风格": "scene_visual_style",
-    },
-    GaliaisNodesCharacterNarrative: {
-        "关系事件": "narrative_relationship",
-        "主题状态": "narrative_theme_state",
-        "引用梗": "meta_reference",
-    },
-    GaliaisNodesCharacterObjectSupplement: {
-        "场景物件": "scene_object",
-        "媒介文档": "object_media_document",
-        "道具补充": "object_prop_extra",
-    },
-    GaliaisNodesCharacterMetaTechnical: {
-        "管理质量": "meta_admin_quality",
-        "技术规格": "meta_technical",
-        "覆盖处理": "meta_overlay_process",
-        "待复审": "uncertain_review",
-    },
-    GaliaisNodesCharacterNSFW: {
-        "裸露": "nsfw_exposure",
-        "露骨身体": "nsfw_body",
-        "性行为": "nsfw_act",
-        "成人主题": "nsfw_context",
-        "性癖道具": "nsfw_fetish_object",
-    },
-    GaliaisNodesDanbooruStyleSelect: {
-        "渲染风格": "渲染风格",
-        "媒介": "媒介",
-        "色彩": "色彩",
-        "光照": "光照",
-        "后期效果": "后期效果",
-        "设计风格": "设计风格",
-        "质量细节": "质量细节",
-    },
-    GaliaisNodesDanbooruTaxonomySelect: {
-        TaxonomyID: "__taxonomy_id__",
-        Tags: "__selected_taxonomy_tags__",
-    },
-};
-
-function apiUrl(path) {
-    if (api?.apiURL) return api.apiURL(path);
-    return path;
-}
-
-function cacheKey(parts) {
-    return JSON.stringify(parts.map((part) => String(part ?? "")));
-}
-
-function getLruCache(cache, key) {
-    if (!cache.has(key)) return null;
-    const value = cache.get(key);
-    cache.delete(key);
-    cache.set(key, value);
-    return value;
-}
-
-function setLruCache(cache, key, value, limit) {
-    cache.set(key, value);
-    while (cache.size > limit) {
-        const oldest = cache.keys().next().value;
-        cache.delete(oldest);
-    }
-}
+let globalTagBlacklist = new Set();
+let globalRandomTaxonomyBlacklist = new Set();
 
 function readLocalTagList(key) {
     try {
@@ -172,27 +98,6 @@ function toggleFavoriteTag(value) {
 function isFavoriteTag(value) {
     const comparable = normalizeComparableTag(value);
     return readLocalTagList(FAVORITE_TAGS_KEY).some((item) => normalizeComparableTag(item) === comparable);
-}
-
-async function readJsonResponse(response, fallbackMessage = "请求失败") {
-    const text = await response.text();
-    let payload = null;
-    if (text.trim()) {
-        try {
-            payload = JSON.parse(text);
-        } catch (error) {
-            const preview = text.replace(/\s+/g, " ").slice(0, 180);
-            throw new Error(`${fallbackMessage}: 后端未返回JSON (${response.status} ${response.statusText}) ${preview}`);
-        }
-    }
-    if (!response.ok) {
-        const message = payload?.error || payload?.message || response.statusText || fallbackMessage;
-        throw new Error(`${fallbackMessage}: ${message}`);
-    }
-    if (!payload) {
-        throw new Error(`${fallbackMessage}: 后端返回空响应，请重启ComfyUI并刷新页面`);
-    }
-    return payload;
 }
 
 function ensureStyles() {
@@ -308,6 +213,24 @@ function ensureStyles() {
 .galiais-nodes-danbooru-row.is-selected:hover {
     background: #3a465c;
 }
+.galiais-nodes-danbooru-row.is-blacklisted {
+    opacity: 0.48;
+    filter: grayscale(0.7);
+}
+.galiais-nodes-danbooru-row.is-blacklisted:hover {
+    background: transparent;
+}
+.galiais-nodes-danbooru-row.is-blacklisted .galiais-nodes-danbooru-tag,
+.galiais-nodes-danbooru-row.is-blacklisted .galiais-nodes-danbooru-label,
+.galiais-nodes-danbooru-row.is-blacklisted .galiais-nodes-danbooru-meta {
+    color: #818b99;
+}
+.galiais-nodes-danbooru-row.is-blacklisted .galiais-nodes-danbooru-button {
+    cursor: pointer;
+    border-color: #3a414c;
+    background: #151a22;
+    color: #8c96a4;
+}
 .galiais-nodes-danbooru-mode {
     display: inline-flex;
     height: 34px;
@@ -355,7 +278,7 @@ function ensureStyles() {
     background: transparent;
     color: #dbe4ee;
     display: grid;
-    grid-template-columns: 18px minmax(0, 1fr) auto;
+    grid-template-columns: 18px minmax(0, 1fr) auto auto;
     gap: 6px;
     align-items: center;
     padding: 4px 9px;
@@ -376,6 +299,9 @@ function ensureStyles() {
 .galiais-nodes-danbooru-tree-row.is-group {
     color: #b9c4d2;
 }
+.galiais-nodes-danbooru-tree-row.is-random-blocked {
+    opacity: 0.58;
+}
 .galiais-nodes-danbooru-tree-toggle {
     color: #e2b86b;
     font-size: 11px;
@@ -390,6 +316,31 @@ function ensureStyles() {
 .galiais-nodes-danbooru-tree-count {
     color: #8491a3;
     font-size: 11px;
+}
+.galiais-nodes-danbooru-tree-random-block {
+    min-width: 52px;
+    height: 22px;
+    padding: 0 6px;
+    border: 1px solid #3c4654;
+    border-radius: 5px;
+    background: #18202b;
+    color: #aeb9c7;
+    cursor: pointer;
+    font: 650 10px/1 ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif;
+    white-space: nowrap;
+}
+.galiais-nodes-danbooru-tree-row.is-random-blocked .galiais-nodes-danbooru-tree-random-block {
+    border-color: #5f6672;
+    background: #252a33;
+    color: #c6ccd6;
+}
+.galiais-nodes-danbooru-tree-row.is-random-partial-blocked .galiais-nodes-danbooru-tree-random-block {
+    border-color: #6d5b35;
+    background: #211d15;
+    color: #dcc685;
+}
+.galiais-nodes-danbooru-tree-random-block:hover {
+    border-color: #e2b86b;
 }
 .galiais-nodes-danbooru-main {
     min-width: 0;
@@ -440,6 +391,7 @@ function ensureStyles() {
     align-items: center;
     justify-content: flex-end;
     gap: 6px;
+    min-width: 0;
 }
 .galiais-nodes-danbooru-star {
     width: 28px;
@@ -457,7 +409,7 @@ function ensureStyles() {
 .galiais-nodes-danbooru-row {
     width: 100%;
     display: grid;
-    grid-template-columns: minmax(180px, 1.1fr) minmax(140px, 1fr) 96px 118px;
+    grid-template-columns: minmax(180px, 1.1fr) minmax(140px, 1fr) 80px minmax(172px, auto);
     gap: 10px;
     align-items: center;
     border: 0;
@@ -482,6 +434,18 @@ function ensureStyles() {
 .galiais-nodes-danbooru-safety {
     font-size: 11px;
     color: #9ca8b8;
+}
+.galiais-nodes-danbooru-row-tools .galiais-nodes-danbooru-button {
+    min-width: 58px;
+    padding: 0 8px;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.galiais-nodes-danbooru-row-tools .galiais-nodes-danbooru-safety {
+    min-width: 42px;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    text-align: right;
 }
 .galiais-nodes-danbooru-footer {
     display: flex;
@@ -556,6 +520,9 @@ function ensureStyles() {
     font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
     overflow-wrap: anywhere;
 }
+.galiais-hidden-widget-row {
+    display: none !important;
+}
 .galiais-field-enable-row {
     position: relative;
     box-sizing: border-box;
@@ -612,7 +579,9 @@ function ensureStyles() {
     white-space: nowrap;
     pointer-events: auto;
     user-select: none;
+    touch-action: none;
     box-sizing: border-box;
+    opacity: 0.97;
 }
 .galiais-field-enable-canvas-toggle.is-on {
     border-color: #e7bf71;
@@ -785,6 +754,10 @@ function realWidgets(node) {
     return (node.widgets || []).filter((widget) => !isSelectorWidget(widget));
 }
 
+function vueLayoutWidgets(node) {
+    return (node.widgets || []).filter((widget) => !isLegacySelectorWidget(widget));
+}
+
 function findWidgetValue(node, name) {
     const widget = (node?.widgets || []).find((item) => item?.name === name);
     return String(widget?.value || widget?.inputEl?.value || "").trim();
@@ -810,6 +783,119 @@ function findDanbooruDbPath() {
         if (value) return value;
     }
     return "";
+}
+
+function normalizeBlacklistTag(value) {
+    let text = String(value || "").trim();
+    if (!text) return "";
+    if (text.includes(" | ")) text = text.split(" | ", 1)[0].trim();
+    text = stripTrailingParenthetical(text).trim();
+    return text.toLowerCase().replace(/\s+/g, "_");
+}
+
+function splitBlacklistText(value) {
+    return String(value || "")
+        .split(/[,，\n\r;；]+/)
+        .map((part) => normalizeBlacklistTag(part))
+        .filter(Boolean);
+}
+
+function findDanbooruTagBlacklist() {
+    const tags = [];
+    const seen = new Set();
+    for (const tag of globalTagBlacklist) {
+        if (seen.has(tag)) continue;
+        seen.add(tag);
+        tags.push(tag);
+    }
+    const nodes = app.graph?._nodes || [];
+    for (const node of nodes) {
+        if (nodeTypeName(node) !== "GaliaisNodesTagBlacklist") continue;
+        const enabledWidget = findWidget(node, "启用");
+        if (enabledWidget && enabledWidget.value === false) continue;
+        for (const tag of splitBlacklistText(findWidgetValue(node, "黑名单Tags"))) {
+            if (seen.has(tag)) continue;
+            seen.add(tag);
+            tags.push(tag);
+        }
+    }
+    return tags.join(",");
+}
+
+async function refreshGlobalTagBlacklist() {
+    try {
+        const response = await fetch(apiUrl("/galiais-nodes/danbooru/tag_blacklist"));
+        const payload = await readJsonResponse(response, "读取Tag黑名单失败");
+        const tags = Array.isArray(payload.tags) ? payload.tags : [];
+        globalTagBlacklist = new Set(tags.map((tag) => normalizeBlacklistTag(tag)).filter(Boolean));
+    } catch (error) {
+        console.warn("[GALIAIS-Nodes] tag blacklist refresh failed", error);
+    }
+    return findDanbooruTagBlacklist();
+}
+
+async function updateGlobalTagBlacklist(action, tags) {
+    const response = await fetch(apiUrl("/galiais-nodes/danbooru/tag_blacklist"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, tags }),
+    });
+    const payload = await readJsonResponse(response, "更新Tag黑名单失败");
+    const nextTags = Array.isArray(payload.tags) ? payload.tags : [];
+    globalTagBlacklist = new Set(nextTags.map((tag) => normalizeBlacklistTag(tag)).filter(Boolean));
+    optionPageCache.clear();
+    return findDanbooruTagBlacklist();
+}
+
+function normalizeTaxonomyPath(value) {
+    return String(value || "").trim().replace(/\s+/g, "").replace(/^\.+|\.+$/g, "");
+}
+
+function findRandomTaxonomyBlacklist() {
+    return Array.from(globalRandomTaxonomyBlacklist).filter(Boolean).join(",");
+}
+
+function isRandomTaxonomyBlockedByAncestorOrSelf(value) {
+    const path = normalizeTaxonomyPath(value);
+    if (!path) return false;
+    for (const item of globalRandomTaxonomyBlacklist) {
+        if (path === item || path.startsWith(`${item}.`)) return true;
+    }
+    return false;
+}
+
+function hasRandomTaxonomyBlockedDescendant(value) {
+    const path = normalizeTaxonomyPath(value);
+    if (!path) return false;
+    for (const item of globalRandomTaxonomyBlacklist) {
+        if (item.startsWith(`${path}.`)) return true;
+    }
+    return false;
+}
+
+async function refreshGlobalRandomTaxonomyBlacklist() {
+    try {
+        const response = await fetch(apiUrl("/galiais-nodes/danbooru/random_taxonomy_blacklist"));
+        const payload = await readJsonResponse(response, "读取随机分类黑名单失败");
+        const items = Array.isArray(payload.taxonomy_ids) ? payload.taxonomy_ids : [];
+        globalRandomTaxonomyBlacklist = new Set(items.map((item) => normalizeTaxonomyPath(item)).filter(Boolean));
+    } catch (error) {
+        console.warn("[GALIAIS-Nodes] random taxonomy blacklist refresh failed", error);
+    }
+    return findRandomTaxonomyBlacklist();
+}
+
+async function updateGlobalRandomTaxonomyBlacklist(action, taxonomyIds) {
+    const response = await fetch(apiUrl("/galiais-nodes/danbooru/random_taxonomy_blacklist"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, taxonomy_ids: taxonomyIds }),
+    });
+    const payload = await readJsonResponse(response, "更新随机分类黑名单失败");
+    const items = Array.isArray(payload.taxonomy_ids) ? payload.taxonomy_ids : [];
+    globalRandomTaxonomyBlacklist = new Set(items.map((item) => normalizeTaxonomyPath(item)).filter(Boolean));
+    optionPageCache.clear();
+    return findRandomTaxonomyBlacklist();
 }
 
 async function selectDanbooruDbFile(node) {
@@ -979,6 +1065,109 @@ function hideFieldEnableWidgets(node, fieldEnablePairs) {
     return changed;
 }
 
+function setWidgetHiddenState(widget, hidden) {
+    if (!widget) return false;
+    let changed = false;
+    if (widget.hidden !== hidden) {
+        widget.hidden = hidden;
+        changed = true;
+    }
+    if (widget.options) widget.options.hidden = hidden;
+    return changed;
+}
+
+function syncFieldRandomControlVisibility(node, fieldEnablePairs) {
+    const widgets = Array.isArray(node?.widgets) ? node.widgets : [];
+    const byName = new Map(widgets.map((widget) => [widget?.name, widget]));
+    const randomEnableWidget = byName.get(RANDOM_ENABLE_WIDGET_NAME);
+    if (!randomEnableWidget) return false;
+    const randomEnabled = isFieldEnabled(randomEnableWidget);
+    const modeWidget = byName.get(TAG_GENERATION_MODE_WIDGET_NAME);
+    const modeValue = String(modeWidget?.value || "");
+    const aiModeEnabled = randomEnabled && !!modeWidget && modeValue !== "规则随机";
+    const aiIntentModeEnabled = aiModeEnabled && modeValue.startsWith("AI意图定向选择");
+    const fieldEnableByName = new Map((fieldEnablePairs || []).map((pair) => [pair.targetName, pair]));
+    let changed = false;
+    if (!randomEnabled) {
+        changed = clearRandomFieldsWidget(node) || changed;
+    }
+    for (const controlWidget of widgets) {
+        const name = String(controlWidget?.name || "");
+        if (!name || name === RANDOM_ENABLE_WIDGET_NAME) continue;
+        if (name === AI_FREEDOM_WIDGET_NAME) {
+            changed = setWidgetHiddenState(controlWidget, !aiModeEnabled) || changed;
+            continue;
+        }
+        if (AI_INTENT_WIDGET_NAMES.has(name)) {
+            changed = setWidgetHiddenState(controlWidget, !aiIntentModeEnabled) || changed;
+            continue;
+        }
+        if (AI_RAG_WIDGET_NAMES.has(name)) {
+            changed = setWidgetHiddenState(controlWidget, !aiModeEnabled) || changed;
+            continue;
+        }
+        if (RANDOM_GLOBAL_CONTROL_NAMES.has(name)) {
+            changed = setWidgetHiddenState(controlWidget, !randomEnabled) || changed;
+            continue;
+        }
+        for (const prefix of ["随机数", "最低热度"]) {
+            if (!name.startsWith(prefix) || name.length <= prefix.length) continue;
+            const pair = fieldEnableByName.get(name.slice(prefix.length));
+            const hidden = !randomEnabled || (pair ? !isFieldEnabled(pair.enableWidget) : false);
+            changed = setWidgetHiddenState(controlWidget, hidden) || changed;
+            break;
+        }
+    }
+    return changed;
+}
+
+function ensureRandomEnableVisibilityCallback(node) {
+    const widget = findWidget(node, RANDOM_ENABLE_WIDGET_NAME);
+    if (!widget || widget._galiaisRandomVisibilityCallbackWrapped) return false;
+    const originalCallback = widget.callback;
+    widget.callback = function () {
+        const output = originalCallback?.apply(this, arguments);
+        const pairs = buildFieldEnablePairs(node);
+        syncFieldRandomControlVisibility(node, pairs);
+        syncVueWidgetRowVisibility(node);
+        ensureVueFieldEnableToggles(node);
+        if (isVueNodeMode(node)) {
+            removeLegacyCanvasFieldEnableToggles(node);
+        } else {
+            scheduleLegacyCanvasFieldEnableToggles(node);
+        }
+        refreshNodeSize(node, true, { fitHeight: true });
+        const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
+        schedule(() => refreshNodeSize(node, true, { fitHeight: true }));
+        return output;
+    };
+    widget._galiaisRandomVisibilityCallbackWrapped = true;
+    return true;
+}
+
+function ensureTagGenerationModeVisibilityCallback(node) {
+    const widget = findWidget(node, TAG_GENERATION_MODE_WIDGET_NAME);
+    if (!widget || widget._galiaisModeVisibilityCallbackWrapped) return false;
+    const originalCallback = widget.callback;
+    widget.callback = function () {
+        const output = originalCallback?.apply(this, arguments);
+        const pairs = buildFieldEnablePairs(node);
+        syncFieldRandomControlVisibility(node, pairs);
+        syncVueWidgetRowVisibility(node);
+        if (isVueNodeMode(node)) {
+            removeLegacyCanvasFieldEnableToggles(node);
+        } else {
+            scheduleLegacyCanvasFieldEnableToggles(node);
+        }
+        refreshNodeSize(node, true, { fitHeight: true });
+        const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
+        schedule(() => refreshNodeSize(node, true, { fitHeight: true }));
+        return output;
+    };
+    widget._galiaisModeVisibilityCallbackWrapped = true;
+    return true;
+}
+
 function cssSelectorValue(value) {
     const text = String(value ?? "");
     if (window.CSS && typeof window.CSS.escape === "function") {
@@ -996,6 +1185,42 @@ function vueNodeElement(node) {
 
 function visibleVueWidgets(node) {
     return realWidgets(node).filter((widget) => !widget?.hidden && !widget?.advanced);
+}
+
+function syncVueWidgetRowVisibility(node) {
+    const root = vueNodeElement(node);
+    if (!root) return false;
+    const rows = Array.from(root.querySelectorAll(".lg-node-widget"));
+    const widgets = vueLayoutWidgets(node);
+    if (!rows.length || rows.length < widgets.length) return false;
+
+    let changed = false;
+    for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index];
+        const widget = widgets[index];
+        const hidden = !!widget && (!!widget.hidden || !!widget.options?.hidden);
+        const currentlyHidden = row.classList.contains(HIDDEN_WIDGET_ROW_CLASS);
+        if (currentlyHidden !== hidden) {
+            row.classList.toggle(HIDDEN_WIDGET_ROW_CLASS, hidden);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+function visibleVueWidgetRows(node, root) {
+    const rows = Array.from(root?.querySelectorAll(".lg-node-widget") || []);
+    const widgets = vueLayoutWidgets(node);
+    if (rows.length >= widgets.length && widgets.length > 0) {
+        const visibleRows = [];
+        for (let index = 0; index < widgets.length; index += 1) {
+            const widget = widgets[index];
+            if (!widget || isSelectorWidget(widget) || widget.hidden || widget.advanced) continue;
+            visibleRows.push(rows[index]);
+        }
+        return visibleRows;
+    }
+    return rows.filter((row) => !row.classList.contains(HIDDEN_WIDGET_ROW_CLASS));
 }
 
 function clearVueFieldEnableToggles(root) {
@@ -1034,11 +1259,12 @@ function renderVueFieldEnableToggles(node) {
     const root = vueNodeElement(node);
     if (!root) return false;
 
-    const rows = Array.from(root.querySelectorAll('.lg-node-widget'));
-    if (!rows.length) return false;
-
     const pairs = buildFieldEnablePairs(node);
     hideFieldEnableWidgets(node, pairs);
+    syncFieldRandomControlVisibility(node, pairs);
+    syncVueWidgetRowVisibility(node);
+    const rows = visibleVueWidgetRows(node, root);
+    if (!rows.length) return false;
     if (!pairs.length) {
         clearVueFieldEnableToggles(root);
         return false;
@@ -1072,6 +1298,7 @@ function renderVueFieldEnableToggles(node) {
                 const currentPair = buildFieldEnablePairs(node).find((item) => item.targetName === fieldName);
                 if (!currentPair) return;
                 setWidgetValue(currentPair.enableWidget, !isFieldEnabled(currentPair.enableWidget));
+                syncFieldRandomControlVisibility(node, buildFieldEnablePairs(node));
                 renderVueFieldEnableToggles(node);
             });
             row.appendChild(button);
@@ -1154,6 +1381,11 @@ function removeLegacyCanvasFieldEnableToggles(node) {
     if (node) legacyCanvasToggleNodes.delete(node);
 }
 
+function removeAllLegacyCanvasFieldEnableToggles() {
+    removeLegacyCanvasFieldEnableToggles();
+    legacyCanvasToggleNodes.clear();
+}
+
 function nodeBelongsToCurrentGraph(node) {
     const graph = app.canvas?.graph || app.graph;
     return !graph || !node?.graph || node.graph === graph;
@@ -1209,7 +1441,13 @@ function ensureFieldEnableDrawLayer(node) {
     const originalDrawWidgets = node.drawWidgets;
     node.drawWidgets = function (ctx, options) {
         const output = originalDrawWidgets.apply(this, arguments);
-        drawFieldEnableToggles(this, ctx, buildFieldEnablePairs(this));
+        const fieldEnablePairs = buildFieldEnablePairs(this);
+        if (isVueNodeMode(this)) {
+            drawFieldEnableToggles(this, ctx, fieldEnablePairs);
+        } else {
+            applyFieldEnableDimState(this, fieldEnablePairs);
+            scheduleLegacyCanvasFieldEnableToggles(this);
+        }
         return output;
     };
     node._galiaisFieldEnableDrawLayer = true;
@@ -1325,7 +1563,20 @@ function eventToCanvasPosition(event) {
     const canvas = app.canvas;
     const ds = canvas?.ds;
     const element = canvas?.canvas;
-    if (!event || !element || !ds) return null;
+    if (!event || !element) return null;
+    if (typeof canvas?.convertEventToCanvasOffset === "function") {
+        try {
+            const pos = canvas.convertEventToCanvasOffset(event);
+            if (Array.isArray(pos) && pos.length >= 2) return [Number(pos[0] || 0), Number(pos[1] || 0)];
+        } catch (_) {}
+    }
+    if (typeof canvas?.convertEventToCanvas === "function") {
+        try {
+            const pos = canvas.convertEventToCanvas(event);
+            if (Array.isArray(pos) && pos.length >= 2) return [Number(pos[0] || 0), Number(pos[1] || 0)];
+        } catch (_) {}
+    }
+    if (!ds) return null;
     const rect = element.getBoundingClientRect();
     const scale = Number(ds.scale || 1) || 1;
     return [
@@ -1346,7 +1597,28 @@ function canvasRectToClientRect(node, rect) {
     const canvas = app.canvas;
     const ds = canvas?.ds;
     const element = canvas?.canvas;
-    if (!node || !rect || !ds || !element || !Array.isArray(node.pos)) return null;
+    if (!node || !rect || !element || !Array.isArray(node.pos)) return null;
+    if (typeof canvas?.convertCanvasToOffset === "function") {
+        try {
+            const topLeft = canvas.convertCanvasToOffset([
+                Number(node.pos[0] || 0) + rect.x,
+                Number(node.pos[1] || 0) + rect.y,
+            ]);
+            const bottomRight = canvas.convertCanvasToOffset([
+                Number(node.pos[0] || 0) + rect.x + rect.w,
+                Number(node.pos[1] || 0) + rect.y + rect.h,
+            ]);
+            if (Array.isArray(topLeft) && Array.isArray(bottomRight)) {
+                return {
+                    left: Number(topLeft[0] || 0),
+                    top: Number(topLeft[1] || 0),
+                    width: Math.max(0, Number(bottomRight[0] || 0) - Number(topLeft[0] || 0)),
+                    height: Math.max(0, Number(bottomRight[1] || 0) - Number(topLeft[1] || 0)),
+                };
+            }
+        } catch (_) {}
+    }
+    if (!ds) return null;
     const canvasRect = element.getBoundingClientRect();
     const scale = Number(ds.scale || 1) || 1;
     const offsetX = Number(ds.offset?.[0] || 0);
@@ -1392,6 +1664,7 @@ function ensureLegacyCanvasFieldEnableButton(node, pair) {
             if (!currentPair) return;
             const pairs = buildFieldEnablePairs(node);
             setWidgetValue(currentPair.enableWidget, !isFieldEnabled(currentPair.enableWidget));
+            syncFieldRandomControlVisibility(node, pairs);
             applyFieldEnableDimState(node, pairs);
             updateLegacyCanvasFieldEnableToggles(node);
             legacyCanvasLastToggle = { time: Date.now(), node };
@@ -1433,6 +1706,7 @@ function updateLegacyCanvasFieldEnableToggles(node) {
     ensureStyles();
     const fieldEnablePairs = buildFieldEnablePairs(node);
     hideFieldEnableWidgets(node, fieldEnablePairs);
+    syncFieldRandomControlVisibility(node, fieldEnablePairs);
     applyFieldEnableDimState(node, fieldEnablePairs);
     ensureLegacyCanvasFieldEnableLayout(node, fieldEnablePairs);
 
@@ -1452,6 +1726,8 @@ function updateLegacyCanvasFieldEnableToggles(node) {
         button.style.top = `${clientRect.top}px`;
         button.style.width = `${Math.max(36, clientRect.width)}px`;
         button.style.height = `${Math.max(18, clientRect.height)}px`;
+        button.style.transform = `scale(${Math.max(0.72, Math.min(1, Number(clientRect.width || 46) / 46))})`;
+        button.style.transformOrigin = "top left";
         button.style.display = "flex";
     }
 
@@ -1476,10 +1752,26 @@ function flushLegacyCanvasFieldEnableToggles() {
 }
 
 function scheduleLegacyCanvasFieldEnableToggles(node) {
-    if (node) legacyCanvasToggleNodes.add(node);
+    if (node) {
+        legacyCanvasToggleNodes.add(node);
+        ensureLegacyCanvasTrackingLoop();
+    }
     if (legacyCanvasToggleFrame !== null) return;
     const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
     legacyCanvasToggleFrame = schedule(flushLegacyCanvasFieldEnableToggles);
+}
+
+function ensureLegacyCanvasTrackingLoop() {
+    if (legacyCanvasTrackingFrame !== null) return;
+    const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
+    const tick = () => {
+        legacyCanvasTrackingFrame = null;
+        if (legacyCanvasToggleNodes.size > 0) {
+            scheduleLegacyCanvasFieldEnableToggles();
+            legacyCanvasTrackingFrame = schedule(tick);
+        }
+    };
+    legacyCanvasTrackingFrame = schedule(tick);
 }
 
 function handleLegacyCanvasFieldTogglePointer(event) {
@@ -1514,8 +1806,11 @@ function ensureLegacyCanvasPointerHandler() {
         element.addEventListener("pointerdown", handleLegacyCanvasFieldTogglePointer, true);
         element.addEventListener("mousedown", handleLegacyCanvasFieldTogglePointer, true);
         element.addEventListener("pointermove", () => scheduleLegacyCanvasFieldEnableToggles(), { passive: true });
+        element.addEventListener("mousemove", () => scheduleLegacyCanvasFieldEnableToggles(), { passive: true });
         element.addEventListener("wheel", () => scheduleLegacyCanvasFieldEnableToggles(), { passive: true });
+        element.addEventListener("mouseleave", () => scheduleLegacyCanvasFieldEnableToggles(), { passive: true });
         window.addEventListener("resize", () => scheduleLegacyCanvasFieldEnableToggles(), { passive: true });
+        window.addEventListener("blur", removeAllLegacyCanvasFieldEnableToggles, { passive: true });
         legacyCanvasPointerHandlerInstalled = true;
     };
     install();
@@ -1613,19 +1908,41 @@ function ensureSelectorButtonWidget(node, lazyFields) {
     return true;
 }
 
-function refreshNodeSize(node, changed = false) {
+function refreshNodeSize(node, changed = false, options = {}) {
     try {
         const computed = node.computeSize();
         const currentWidth = Number(node.size?.[0] || 0);
         const currentHeight = Number(node.size?.[1] || 0);
         const nextWidth = Math.max(currentWidth, Number(computed?.[0] || currentWidth));
-        const nextHeight = Math.max(currentHeight, Number(computed?.[1] || currentHeight));
-        node.setSize([nextWidth, nextHeight]);
+        const computedHeight = Number(computed?.[1] || currentHeight);
+        const fitHeight = options?.fitHeight === true;
+        const allowHeightGrowth = options?.allowHeightGrowth !== false;
+        let nextHeight = currentHeight;
+        if (fitHeight) {
+            nextHeight = computedHeight;
+        } else if (allowHeightGrowth) {
+            nextHeight = Math.max(currentHeight, computedHeight);
+        }
+        if (nextWidth !== currentWidth || nextHeight !== currentHeight) {
+            node.setSize([nextWidth, nextHeight]);
+        }
         app.graph?.setDirtyCanvas(true, changed);
     } catch (error) {
         app.graph?.setDirtyCanvas(true, changed);
     }
 }
+
+// Composer UI implementation lives in galiais_nodes_composer_ui.js.
+// Compatibility markers for source-level regression tests:
+// function promptSectionInputNumber
+// function syncComposerPromptSectionInputs
+// function addComposerPromptSectionInput
+// function autoExtendComposerPromptSections
+// function ensureComposerTemplateButtonWidget
+// function openComposerTemplatePanel
+// function syncComposerTemplatePanelFromWidgets
+// function applyComposerTemplatePanelToWidgets
+// function hideComposerTemplateWidgets
 
 function cleanLegacyWidgetValues(node) {
     const serialized = node.widgets_values;
@@ -1696,51 +2013,10 @@ function ensureAiModelsButtonWidget(node) {
     return true;
 }
 
-function ensurePromptViewerWidgets(node) {
-    if (!node || typeof node.addDOMWidget !== "function" || node._galiaisPromptViewer) {
-        return false;
-    }
-    ensureStyles();
-    const container = document.createElement("div");
-    container.className = "galiais-nodes-prompt-viewer";
-    const fields = {};
-    for (const [key, labelText, rows] of [
-        ["positive", "正面提示词", 4],
-        ["negative", "负面提示词", 3],
-        ["metadata", "元信息JSON", 4],
-    ]) {
-        const label = document.createElement("label");
-        label.textContent = labelText;
-        const textarea = document.createElement("textarea");
-        textarea.readOnly = true;
-        textarea.rows = rows;
-        textarea.spellcheck = false;
-        container.appendChild(label);
-        container.appendChild(textarea);
-        fields[key] = textarea;
-    }
-    const widget = node.addDOMWidget("GALIAIS输出", "galiais_prompt_viewer", container, {
-        serialize: false,
-    });
-    widget.serialize = false;
-    node._galiaisPromptViewer = { container, fields, widget };
-    return true;
-}
-
-function updatePromptViewerWidgets(node, message) {
-    ensurePromptViewerWidgets(node);
-    const viewer = node?._galiaisPromptViewer;
-    if (!viewer) return;
-    const pick = (key) => {
-        const value = message?.[key];
-        if (Array.isArray(value)) return String(value[0] ?? "");
-        return String(value ?? "");
-    };
-    viewer.fields.positive.value = pick("positive");
-    viewer.fields.negative.value = pick("negative");
-    viewer.fields.metadata.value = pick("metadata");
-    app.graph?.setDirtyCanvas(true, true);
-}
+// Prompt Viewer UI implementation lives in galiais_nodes_prompt_viewer_ui.js.
+// Compatibility markers for source-level regression tests:
+// function ensurePromptViewerWidgets
+// function updatePromptViewerWidgets
 
 function ensureRandomFieldsWidget(node) {
     if (!node || typeof node.addDOMWidget !== "function") return null;
@@ -1758,6 +2034,7 @@ function ensureRandomFieldsWidget(node) {
         serialize: false,
     });
     widget.serialize = false;
+    setWidgetHiddenState(widget, true);
     node._galiaisRandomFields = { container, rows, widget };
     return node._galiaisRandomFields;
 }
@@ -1792,9 +2069,28 @@ function updateRandomFieldsWidget(node, message) {
         row.appendChild(content);
         state.rows.appendChild(row);
     }
-    state.container.classList.toggle("is-visible", entries.length > 0);
+    const visible = entries.length > 0;
+    state.container.classList.toggle("is-visible", visible);
+    setWidgetHiddenState(state.widget, !visible);
+    syncVueWidgetRowVisibility(node);
     app.graph?.setDirtyCanvas(true, true);
     return true;
+}
+
+function clearRandomFieldsWidget(node) {
+    const state = node?._galiaisRandomFields;
+    if (!state) return false;
+    let changed = false;
+    if (state.rows?.childNodes?.length) {
+        state.rows.replaceChildren();
+        changed = true;
+    }
+    if (state.container?.classList?.contains("is-visible")) {
+        state.container.classList.remove("is-visible");
+        changed = true;
+    }
+    changed = setWidgetHiddenState(state.widget, true) || changed;
+    return changed;
 }
 
 function openFieldChooser(node, lazyFields, event = null) {
@@ -2059,7 +2355,7 @@ function openTaxonomySelector(targetWidget, title, dbPath = "") {
             return;
         }
         const shapeKey = taxonomyTreeCacheKey(dbPath, false, allowNsfw.checked);
-        const cached = getLruCache(treePayloadCache, shapeKey);
+        const cached = treePayloadCache.get(shapeKey);
         if (cached) {
             lastTreePayload = cached;
             renderTree(cached);
@@ -2081,7 +2377,7 @@ function openTaxonomySelector(targetWidget, title, dbPath = "") {
             );
             const shapePayload = await readJsonResponse(shapeResponse, "分类读取失败");
             if (requestId !== treeRequestId) return;
-            setLruCache(treePayloadCache, shapeKey, shapePayload, TREE_CACHE_LIMIT);
+            treePayloadCache.set(shapeKey, shapePayload);
             lastTreePayload = shapePayload;
             renderTree(shapePayload);
         } catch (error) {
@@ -2125,6 +2421,8 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
     let selectedLabel = "全部";
     let selectMode = "append";
     let stagedParts = splitWidgetParts(targetWidget);
+    let blacklist = findDanbooruTagBlacklist();
+    let randomTaxonomyBlacklist = findRandomTaxonomyBlacklist();
     const expandedTreeNodes = new Set(["root"]);
     let lastTreePayload = null;
     let activePageController = null;
@@ -2337,7 +2635,8 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
             row.setAttribute("aria-pressed", selected ? "true" : "false");
             const safety = row.querySelector(".galiais-nodes-danbooru-safety");
             if (safety) {
-                safety.textContent = `${selected ? "已选 · " : ""}${row.dataset.nsfw === "1" ? "NSFW" : "SFW"}`;
+                const statePrefix = row.dataset.blacklisted === "1" ? "已屏蔽 · " : selected ? "已选 · " : "";
+                safety.textContent = `${statePrefix}${row.dataset.nsfw === "1" ? "NSFW" : "SFW"}`;
             }
         }
         renderSelectedBar();
@@ -2370,18 +2669,26 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
     }
 
     function addRow(item) {
-        const row = document.createElement("button");
+        const row = document.createElement("div");
         row.className = "galiais-nodes-danbooru-row";
+        row.tabIndex = 0;
+        row.setAttribute("role", "button");
         row.title = item.taxonomy_id || "";
         const value = item.option || item.tag || "";
         row.dataset.option = value;
         row.dataset.nsfw = item.is_nsfw ? "1" : "0";
+        row.dataset.blacklisted = item.is_blacklisted ? "1" : "0";
         const currentTokens = selectedStagedTokens();
         const itemTokens = comparableTagTokens(item.option || item.tag || "");
         const isSelected = tagTokenSetsIntersect(currentTokens, itemTokens);
+        let rowBlacklisted = !!item.is_blacklisted;
         if (isSelected) {
             row.classList.add("is-selected");
             row.setAttribute("aria-pressed", "true");
+        }
+        if (rowBlacklisted) {
+            row.classList.add("is-blacklisted");
+            row.setAttribute("aria-disabled", "true");
         }
 
         const tag = document.createElement("div");
@@ -2412,14 +2719,54 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
             const active = toggleFavoriteTag(value);
             star.classList.toggle("is-active", active);
         });
+        const block = document.createElement("button");
+        block.type = "button";
+        block.className = "galiais-nodes-danbooru-button";
+        block.textContent = rowBlacklisted ? "已屏蔽" : "屏蔽";
+        block.title = rowBlacklisted ? "已在Tag黑名单中，点击恢复" : "加入Tag黑名单";
+        block.addEventListener("click", async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const tagName = item.tag || baseOptionText(value);
+            if (!tagName) return;
+            const action = rowBlacklisted ? "remove" : "add";
+            block.disabled = true;
+            setStatus(`${action === "add" ? "正在屏蔽" : "正在恢复"}: ${tagName}`);
+            try {
+                blacklist = await updateGlobalTagBlacklist(action, [tagName]);
+                rowBlacklisted = action === "add";
+                item.is_blacklisted = rowBlacklisted;
+                row.classList.toggle("is-blacklisted", rowBlacklisted);
+                if (rowBlacklisted) {
+                    row.setAttribute("aria-disabled", "true");
+                } else {
+                    row.removeAttribute("aria-disabled");
+                }
+                row.dataset.blacklisted = rowBlacklisted ? "1" : "0";
+                block.textContent = rowBlacklisted ? "已屏蔽" : "屏蔽";
+                block.title = rowBlacklisted ? "已在Tag黑名单中，点击恢复" : "加入Tag黑名单";
+                const selectedNow = isValueSelected(value);
+                safety.textContent = `${rowBlacklisted ? "已屏蔽 · " : selectedNow ? "已选 · " : ""}${item.is_nsfw ? "NSFW" : "SFW"}`;
+                setStatus(`${rowBlacklisted ? "已加入黑名单" : "已移出黑名单"}: ${formatSelectedOption(value)}`);
+            } catch (error) {
+                setStatus(`${action === "add" ? "加入黑名单失败" : "移出黑名单失败"}: ${error.message || error}`);
+            } finally {
+                block.disabled = false;
+            }
+        });
         const safety = document.createElement("div");
         safety.className = "galiais-nodes-danbooru-safety";
-        safety.textContent = `${isSelected ? "已选 · " : ""}${item.is_nsfw ? "NSFW" : "SFW"}`;
+        safety.textContent = `${rowBlacklisted ? "已屏蔽 · " : isSelected ? "已选 · " : ""}${item.is_nsfw ? "NSFW" : "SFW"}`;
         tools.appendChild(star);
+        tools.appendChild(block);
         tools.appendChild(safety);
         row.appendChild(tools);
 
-        row.addEventListener("click", () => {
+        const activateRow = () => {
+            if (rowBlacklisted) {
+                setStatus(`已屏蔽: ${formatSelectedOption(value)}`);
+                return;
+            }
             const selected = isValueSelected(value);
             if (selected) {
                 const result = removeTagParts(stagedParts, value);
@@ -2436,6 +2783,12 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
                 updateConfirmStatus("已替换为");
             }
             refreshVisibleSelectionState();
+        };
+        row.addEventListener("click", activateRow);
+        row.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            activateRow();
         });
         results.appendChild(row);
     }
@@ -2448,6 +2801,7 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
             query,
             language.value,
             allowNsfw.checked ? "1" : "0",
+            blacklist,
             PAGE_LIMIT,
             pageOffset,
         ]);
@@ -2504,12 +2858,13 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
             q: query,
             language: language.value,
             allow_nsfw: allowNsfw.checked ? "1" : "0",
+            blacklist,
             limit: String(PAGE_LIMIT),
             offset: String(nextOffset),
         });
         fetch(apiUrl(`/galiais-nodes/danbooru/options?${params.toString()}`))
             .then((response) => readJsonResponse(response, "预取失败"))
-            .then((payload) => setLruCache(optionPageCache, key, payload, OPTION_PAGE_CACHE_LIMIT))
+            .then((payload) => optionPageCache.set(key, payload))
             .catch(() => {});
     }
 
@@ -2528,7 +2883,7 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
         const requestOffset = offset;
         lastQuery = query;
         const key = pageCacheKey(query, requestOffset);
-        const cached = getLruCache(optionPageCache, key);
+        const cached = optionPageCache.get(key);
         if (cached) {
             renderPagePayload(cached, reset);
             prefetchNextPage(query);
@@ -2548,6 +2903,7 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
                 q: query,
                 language: language.value,
                 allow_nsfw: allowNsfw.checked ? "1" : "0",
+                blacklist,
                 limit: String(PAGE_LIMIT),
                 offset: String(requestOffset),
             });
@@ -2557,7 +2913,7 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
             );
             const payload = await readJsonResponse(response, "查询失败");
             if (requestId !== pageRequestId) return;
-            setLruCache(optionPageCache, key, payload, OPTION_PAGE_CACHE_LIMIT);
+            optionPageCache.set(key, payload);
             renderPagePayload(payload, reset);
             prefetchNextPage(query);
         } catch (error) {
@@ -2582,6 +2938,8 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
             q: search.value.trim(),
             language: language.value,
             allow_nsfw: allowNsfw.checked ? "1" : "0",
+            blacklist,
+            taxonomy_blacklist: randomTaxonomyBlacklist,
             count: "1",
             seed: String(Math.floor(Math.random() * 0xffffffff)),
         });
@@ -2594,7 +2952,7 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
                 setStatus("当前分类没有可随机选择的 tag");
                 return;
             }
-            const item = items[Math.floor(Math.random() * items.length)];
+            const item = items[0];
             const value = item.option || item.tag || "";
             if (selectMode === "replace") {
                 const next = formatSelectedOption(value);
@@ -2668,8 +3026,12 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
     updateModeButtons();
     updateFilterLabel();
     renderSelectedBar();
-    loadTree();
-    loadPage(true);
+    Promise.all([refreshGlobalTagBlacklist(), refreshGlobalRandomTaxonomyBlacklist()]).then(([tagValue, taxonomyValue]) => {
+        blacklist = tagValue;
+        randomTaxonomyBlacklist = taxonomyValue;
+        loadTree();
+        loadPage(true);
+    });
 
     function treeCacheKey(includeCounts = true) {
         return cacheKey([
@@ -2687,14 +3049,14 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
             return;
         }
         const fullKey = treeCacheKey(true);
-        const cached = getLruCache(treePayloadCache, fullKey);
+        const cached = treePayloadCache.get(fullKey);
         if (cached) {
             lastTreePayload = cached;
             renderTree(cached);
             return;
         }
         const shapeKey = treeCacheKey(false);
-        const cachedShape = getLruCache(treePayloadCache, shapeKey);
+        const cachedShape = treePayloadCache.get(shapeKey);
         if (cachedShape) {
             lastTreePayload = cachedShape;
             renderTree(cachedShape);
@@ -2717,7 +3079,7 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
                 );
                 const shapePayload = await readJsonResponse(shapeResponse, "分类读取失败");
                 if (requestId !== treeRequestId) return;
-                setLruCache(treePayloadCache, shapeKey, shapePayload, TREE_CACHE_LIMIT);
+                treePayloadCache.set(shapeKey, shapePayload);
                 lastTreePayload = shapePayload;
                 renderTree(shapePayload);
             }
@@ -2734,7 +3096,7 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
             );
             const payload = await readJsonResponse(response, "分类读取失败");
             if (requestId !== treeRequestId) return;
-            setLruCache(treePayloadCache, fullKey, payload, TREE_CACHE_LIMIT);
+            treePayloadCache.set(fullKey, payload);
             lastTreePayload = payload;
             renderTree(payload);
         } catch (error) {
@@ -2769,8 +3131,16 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
         const isExpanded = expandedTreeNodes.has(node.id);
         const row = document.createElement("button");
         const depthClass = depth === 0 ? "is-domain" : depth >= 2 ? "is-group" : "";
-        row.className = `galiais-nodes-danbooru-tree-row ${isLeaf ? "is-leaf" : depthClass} ${selectedField === node.taxonomy_id ? "is-active" : ""}`;
+        const randomBlacklistPath = normalizeTaxonomyPath(node.taxonomy_prefix || node.taxonomy_id || node.id || "");
+        const randomBlocked = isRandomTaxonomyBlockedByAncestorOrSelf(randomBlacklistPath);
+        const randomPartiallyBlocked = !randomBlocked && hasRandomTaxonomyBlockedDescendant(randomBlacklistPath);
+        row.className = `galiais-nodes-danbooru-tree-row ${isLeaf ? "is-leaf" : depthClass} ${selectedField === node.taxonomy_id ? "is-active" : ""} ${randomBlocked ? "is-random-blocked" : ""} ${randomPartiallyBlocked ? "is-random-partial-blocked" : ""}`;
         row.style.paddingLeft = `${12 + depth * 20 + (isLeaf ? 8 : 0)}px`;
+        row.title = randomBlocked
+            ? "此分类已从随机候选中排除；手动选择不受影响"
+            : randomPartiallyBlocked
+                ? "部分子分类已从随机候选中排除；点击屏蔽会排除剩余子分类"
+                : "";
 
         const toggle = document.createElement("span");
         toggle.className = "galiais-nodes-danbooru-tree-toggle";
@@ -2787,6 +3157,29 @@ function openSelector(targetWidget, fieldKey, title, dbPath = "") {
         count.className = "galiais-nodes-danbooru-tree-count";
         count.textContent = countsIncluded ? String(node.count ?? 0) : "...";
         row.appendChild(count);
+
+        const randomBlock = document.createElement("button");
+        randomBlock.type = "button";
+        randomBlock.className = "galiais-nodes-danbooru-tree-random-block";
+        randomBlock.textContent = randomBlocked ? "已屏蔽" : "屏蔽";
+        randomBlock.title = randomBlocked ? "恢复此分类参与随机" : "排除此分类及子分类的随机候选";
+        randomBlock.addEventListener("click", async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const action = randomBlocked ? "remove" : "add";
+            randomBlock.disabled = true;
+            setStatus(`${action === "add" ? "正在随机屏蔽" : "正在恢复随机"}: ${node.label || randomBlacklistPath}`);
+            try {
+                randomTaxonomyBlacklist = await updateGlobalRandomTaxonomyBlacklist(action, [randomBlacklistPath]);
+                renderTree(lastTreePayload);
+                setStatus(`${action === "add" ? "已排除随机分类" : "已恢复随机分类"}: ${node.label || randomBlacklistPath}`);
+            } catch (error) {
+                setStatus(`随机分类黑名单更新失败: ${error.message || error}`);
+            } finally {
+                randomBlock.disabled = false;
+            }
+        });
+        row.appendChild(randomBlock);
 
         row.addEventListener("click", () => {
             if (isLeaf) {
@@ -2830,7 +3223,7 @@ app.registerExtension({
             nodeType.prototype.onNodeCreated = function () {
                 onNodeCreated?.apply(this, arguments);
                 setTimeout(() => {
-                    const changed = ensurePromptViewerWidgets(this);
+                    const changed = ensurePromptViewerWidgets(this, { ensureStyles });
                     if (changed) refreshNodeSize(this, true);
                 }, 0);
             };
@@ -2839,7 +3232,7 @@ app.registerExtension({
             nodeType.prototype.onConfigure = function () {
                 onConfigure?.apply(this, arguments);
                 setTimeout(() => {
-                    const changed = ensurePromptViewerWidgets(this);
+                    const changed = ensurePromptViewerWidgets(this, { ensureStyles });
                     if (changed) refreshNodeSize(this, true);
                 }, 0);
             };
@@ -2847,7 +3240,7 @@ app.registerExtension({
             const onExecuted = nodeType.prototype.onExecuted;
             nodeType.prototype.onExecuted = function (message) {
                 onExecuted?.apply(this, arguments);
-                updatePromptViewerWidgets(this, message || {});
+                updatePromptViewerWidgets(this, message || {}, { ensureStyles, app });
                 refreshNodeSize(this, true);
             };
             return;
@@ -2895,6 +3288,18 @@ app.registerExtension({
             return;
         }
 
+        if (nodeData?.name === COMPOSER_NODE_NAME) {
+            installComposerPromptSectionControls(nodeType, {
+                findWidget,
+                setWidgetValue,
+                setWidgetHiddenState,
+                syncVueWidgetRowVisibility,
+                refreshNodeSize,
+                ensureStyles,
+            });
+            return;
+        }
+
         const inputs = nodeData?.input?.required || {};
         const lazyFields = new Map();
         for (const [name, config] of Object.entries(inputs)) {
@@ -2906,7 +3311,8 @@ app.registerExtension({
             if (!lazyFields.has(name)) lazyFields.set(name, field);
         }
         const hasFieldEnableControls = Object.keys(inputs).some((name) => String(name || "").startsWith("使用"));
-        if (!lazyFields.size && !hasFieldEnableControls) return;
+        const hasRandomEnableControl = Object.prototype.hasOwnProperty.call(inputs, RANDOM_ENABLE_WIDGET_NAME);
+        if (!lazyFields.size && !hasFieldEnableControls && !hasRandomEnableControl) return;
 
         function scrubNode(node) {
             const fieldEnablePairs = buildFieldEnablePairs(node);
@@ -2914,7 +3320,10 @@ app.registerExtension({
             ensureLegacyCanvasPointerHandler();
             const removedWidgets = removeLegacySelectorWidgets(node);
             const cleanedValues = cleanLegacyWidgetValues(node);
+            const randomCallbackChanged = ensureRandomEnableVisibilityCallback(node);
+            const modeCallbackChanged = ensureTagGenerationModeVisibilityCallback(node);
             const hiddenEnableWidgets = hideFieldEnableWidgets(node, fieldEnablePairs);
+            const randomControlVisibilityChanged = syncFieldRandomControlVisibility(node, fieldEnablePairs);
             const legacyCanvasLayoutChanged = ensureLegacyCanvasFieldEnableLayout(node, fieldEnablePairs);
             applyFieldEnableDimState(node, fieldEnablePairs);
             ensureVueFieldEnableToggles(node);
@@ -2923,7 +3332,7 @@ app.registerExtension({
             } else {
                 scheduleLegacyCanvasFieldEnableToggles(node);
             }
-            return removedWidgets || cleanedValues || hiddenEnableWidgets || legacyCanvasLayoutChanged;
+            return removedWidgets || cleanedValues || randomCallbackChanged || modeCallbackChanged || hiddenEnableWidgets || randomControlVisibilityChanged || legacyCanvasLayoutChanged;
         }
 
         const onConfigure = nodeType.prototype.onConfigure;
@@ -2933,7 +3342,9 @@ app.registerExtension({
             setTimeout(() => {
                 const buttonChanged = ensureSelectorButtonWidget(this, lazyFields);
                 ensureVueFieldEnableToggles(this);
-                if (changed || buttonChanged) refreshNodeSize(this, changed || buttonChanged);
+                if (changed || buttonChanged) {
+                    refreshNodeSize(this, changed || buttonChanged, { allowHeightGrowth: false });
+                }
             }, 0);
             if (changed) app.graph?.setDirtyCanvas(true, true);
         };

@@ -1,0 +1,78 @@
+export const FALLBACK_FIELD_MAP = {
+    GaliaisNodesCharacterIdentity: {
+        "主体人数": "identity_subject",
+        "角色": "identity_character",
+        "作品": "identity_work",
+        "画师": "identity_artist",
+        "年龄身份": "identity_role",
+    },
+    GaliaisNodesCharacterFaceHairEyes: {
+        "头发": "face_hair",
+        "眼睛视线": "face_eyes",
+        "脸部五官": "face_face",
+        "情绪表情": "face_expression",
+    },
+    GaliaisNodesCharacterBody: {
+        "体型比例": "body_shape",
+        "四肢躯干": "body_limbs",
+        "皮肤质感": "body_skin",
+        "非人身体": "body_nonhuman",
+    },
+    GaliaisNodesCharacterOutfit: {
+        "上装外套": "outfit_upper",
+        "下装鞋袜": "outfit_lower",
+        "连体贴身": "outfit_onepiece",
+        "配饰": "outfit_accessory",
+        "材质细节": "outfit_material_detail",
+        "穿着状态": "outfit_state",
+    },
+    GaliaisNodesCharacterPoseAction: {
+        "整体姿态": "pose_posture",
+        "肢体手势": "pose_gesture",
+        "动作行为": "pose_action",
+        "互动关系": "pose_interaction",
+    },
+    GaliaisNodesCharacterSceneStyle: {
+        "镜头构图": "scene_camera",
+        "地点背景": "scene_location",
+        "时间天气": "scene_time_weather",
+        "道具生物": "scene_object",
+        "画面风格": "scene_visual_style",
+    },
+    GaliaisNodesCharacterNarrative: {
+        "关系事件": "narrative_relationship",
+        "主题状态": "narrative_theme_state",
+        "引用梗": "meta_reference",
+    },
+    GaliaisNodesCharacterObjectSupplement: {
+        "场景物件": "scene_object",
+        "媒介文档": "object_media_document",
+        "道具补充": "object_prop_extra",
+    },
+    GaliaisNodesCharacterMetaTechnical: {
+        "管理质量": "meta_admin_quality",
+        "技术规格": "meta_technical",
+        "覆盖处理": "meta_overlay_process",
+        "待复审": "uncertain_review",
+    },
+    GaliaisNodesCharacterNSFW: {
+        "裸露": "nsfw_exposure",
+        "露骨身体": "nsfw_body",
+        "性行为": "nsfw_act",
+        "成人主题": "nsfw_context",
+        "性癖道具": "nsfw_fetish_object",
+    },
+    GaliaisNodesDanbooruStyleSelect: {
+        "渲染风格": "渲染风格",
+        "媒介": "媒介",
+        "色彩": "色彩",
+        "光照": "光照",
+        "后期效果": "后期效果",
+        "设计风格": "设计风格",
+        "质量细节": "质量细节",
+    },
+    GaliaisNodesDanbooruTaxonomySelect: {
+        TaxonomyID: "__taxonomy_id__",
+        Tags: "__selected_taxonomy_tags__",
+    },
+};
